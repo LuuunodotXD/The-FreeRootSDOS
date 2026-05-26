@@ -1,9 +1,9 @@
 # FreeRootSDOS
 
-**Um sistema operacional mínimo e didático escrito em C e Assembly, com bootloader próprio, kernel em modo protegido, terminal VGA e um shell de comandos.**
+**Um sistema operacional mínimo e didático de 32 bits, escrito em C e Assembly, com bootloader próprio, kernel em modo protegido, interrupt IDT/IRQ, terminal VGA e um shell de comandos.**
 *Feito por LuuunoXD*
 
-![Demonstração](https://i.imgur.com/rofwmU0.png)  
+![Demonstração](https://i.imgur.com/Z3NJtOB.png)  
 
 ## Funcionalidades
 
@@ -11,11 +11,9 @@
 - *Kernel C com acesso direto à memória VGA (buffer 0xB8000)*
 - *Terminal com rolagem, cores e cursor de hardware*
 - *Shell com linha de comando e edição (backspace, enter)*
-- Comandos internos:
+- *Interrupts IDT/IRQ (novidade)*
+- Para ver os comandos (estão na foto também):
   - `help`   → lista os comandos disponíveis
-  - `clear`  → limpa a tela
-  - `reboot` → reinicia o sistema via controlador de teclado
-  - `info`   → exibe informações do SO
 
 ## Compilação e Execução
 
