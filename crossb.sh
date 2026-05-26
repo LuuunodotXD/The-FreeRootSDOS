@@ -1,0 +1,45 @@
+#!/bin/bash
+set -e
+
+CFLAGS="-m32 -ffreestanding -nostdlib -fno-pie -fno-pic -fno-stack-protector -O0"
+
+echo "==> Compilando bootloader..."
+nasm -f bin boot.asm -o boot.bin
+
+echo "==> Compilando entry point..."
+nasm -f elf32 entry.asm -o entry.o
+
+echo "==> Compilando kernel..."
+i686-linux-gnu-gcc $CFLAGS -c kernel.c   -o kernel.o
+i686-linux-gnu-gcc $CFLAGS -c terminal.c -o terminal.o
+i686-linux-gnu-gcc $CFLAGS -c shell.c    -o shell.o
+i686-linux-gnu-gcc $CFLAGS -c keyboard.c -o keyboard.o
+
+echo "==> Linkando..."
+i686-linux-gnu-ld -m elf_i386 -T linker.ld -o kernel.elf \
+    entry.o kernel.o terminal.o shell.o keyboard.o
+
+echo "==> Verificando entry point..."
+nm kernel.elf | grep -E "_start|kernel_main|_bss"
+
+echo "==> Gerando binário..."
+objcopy -O binary kernel.elf kernel.bin
+
+# Monta a imagem de disco
+cat boot.bin kernel.bin > os_image.bin
+
+# Padding: expande para 1.44MB (floppy padrão = 2880 setores x 512 bytes)
+# Garante que INT 13h nunca tenta ler além do fim do arquivo
+truncate -s 10752 os_image.bin   # 21 setores x 512 (1 boot + 20 kernel)
+
+echo ""
+echo "Tamanhos:"
+wc -c boot.bin kernel.bin os_image.bin
+
+echo ""
+echo "Primeiros bytes do kernel.bin (deve ser código x86):"
+xxd kernel.bin | head -3
+
+echo ""
+echo "Para rodar:"
+echo "  qemu-system-i386 -drive format=raw,file=os_image.bin,if=ide"
