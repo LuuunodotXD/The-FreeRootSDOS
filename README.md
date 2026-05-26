@@ -1,7 +1,7 @@
 # 🖥️ FreeRootSDOS
 
-**Um sistema operacional minimalista e didático escrito em C e Assembly, com bootloader próprio, kernel em modo protegido, terminal VGA e uma shell de comandos interativa.**
-*Feito inteiramente por LuuunoXD*
+**Um sistema operacional mínimo e didático escrito em C e Assembly, com bootloader próprio, kernel em modo protegido, terminal VGA e um shell de comandos.**
+*Feito por LuuunoXD*
 
 ![Demonstração](https://i.imgur.com/rofwmU0.png)  
 
