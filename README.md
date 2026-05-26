@@ -1,11 +1,11 @@
-# 🖥️ FreeRootSDOS
+# FreeRootSDOS
 
 **Um sistema operacional mínimo e didático escrito em C e Assembly, com bootloader próprio, kernel em modo protegido, terminal VGA e um shell de comandos.**
 *Feito por LuuunoXD*
 
 ![Demonstração](https://i.imgur.com/rofwmU0.png)  
 
-## ✨ Funcionalidades
+## Funcionalidades
 
 - *Bootloader em Assembly (modo real → modo protegido)*
 - *Kernel C com acesso direto à memória VGA (buffer 0xB8000)*
@@ -17,7 +17,7 @@
   - `reboot` → reinicia o sistema via controlador de teclado
   - `info`   → exibe informações do SO
 
-## 🛠️ Compilação e Execução
+## Compilação e Execução
 
 ### Requisitos
 
