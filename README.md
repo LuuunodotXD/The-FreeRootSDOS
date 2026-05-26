@@ -3,7 +3,7 @@
 **Um sistema operacional minimalista e didático escrito em C e Assembly, com bootloader próprio, kernel em modo protegido, terminal VGA e uma shell de comandos interativa.**
 *Feito inteiramente por LuuunoXD*
 
-![Demonstração](https://imgur.com/a/qekK50x)  
+![Demonstração] (https://i.imgur.com/rofwmU0.png)  
 
 ## ✨ Funcionalidades
 
