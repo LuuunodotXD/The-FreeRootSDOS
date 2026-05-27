@@ -8,8 +8,13 @@ void    terminal_writestring(const char *str);
 void    terminal_putchar(char c);
 void    terminal_clear(void);
 void    terminal_update_cursor(void);
-void    terminal_set_fg(uint8_t fg);   // 0x0–0xF
-void    terminal_set_bg(uint8_t bg);   // 0x0–0xF
-uint8_t terminal_get_fg(void);         // retorna cor atual do texto
+void    terminal_set_fg(uint8_t fg);
+void    terminal_set_bg(uint8_t bg);
+uint8_t terminal_get_fg(void);
+
+// Move o cursor de hardware N posições para esquerda/direita
+// sem apagar ou escrever nada — usado pelo shell para Home/End/setas
+void    terminal_cursor_left(int n);
+void    terminal_cursor_right(int n);
 
 #endif

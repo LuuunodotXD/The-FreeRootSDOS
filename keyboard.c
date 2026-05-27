@@ -4,54 +4,166 @@
 #include "io.h"
 
 // ----------------------------------------------------------------
-// Ring buffer — preenchido pelo IRQ1, consumido pelo getchar()
+// Ring buffer
 // ----------------------------------------------------------------
 
 #define KBUF_SIZE 64
 
-static volatile char kbuf[KBUF_SIZE];
-static volatile int  kbuf_head = 0;   // próxima posição de escrita
-static volatile int  kbuf_tail = 0;   // próxima posição de leitura
+static volatile int kbuf[KBUF_SIZE];   // int para armazenar KEY_* > 127
+static volatile int kbuf_head = 0;
+static volatile int kbuf_tail = 0;
 
-static const char scancode_to_ascii[] = {
-    0,    0,   '1', '2', '3', '4', '5', '6', '7', '8',
-    '9', '0',  '-', '=', '\b', 0,  'q', 'w', 'e', 'r',
-    't', 'y',  'u', 'i', 'o', 'p', '[', ']', '\n', 0,
-    'a', 's',  'd', 'f', 'g', 'h', 'j', 'k', 'l', ';',
-    '\'', 0,    0, '\\', 'z', 'x', 'c', 'v', 'b', 'n',
-    'm', ',',  '.', '/',  0,  '*',  0,  ' '
+static void kbuf_put(int val) {
+    int next = (kbuf_head + 1) % KBUF_SIZE;
+    if (next != kbuf_tail) {
+        kbuf[kbuf_head] = val;
+        kbuf_head = next;
+    }
+}
+
+// ----------------------------------------------------------------
+// Tabelas de scancode — layout US QWERTY completo
+// ----------------------------------------------------------------
+
+// Tecla normal (sem shift)
+static const char sc_normal[58] = {
+/*00*/  0,
+/*01*/  27,           // Esc
+/*02*/  '1','2','3','4','5','6','7','8','9','0',
+/*0C*/  '-','=',
+/*0E*/  '\b',         // Backspace
+/*0F*/  '\t',         // Tab
+/*10*/  'q','w','e','r','t','y','u','i','o','p',
+/*1A*/  '[',']',
+/*1C*/  '\n',         // Enter
+/*1D*/  0,            // Ctrl esquerdo
+/*1E*/  'a','s','d','f','g','h','j','k','l',
+/*27*/  ';',
+/*28*/  '\'',
+/*29*/  '`',
+/*2A*/  0,            // Shift esquerdo
+/*2B*/  '\\',
+/*2C*/  'z','x','c','v','b','n','m',
+/*33*/  ',','.','/',
+/*36*/  0,            // Shift direito
+/*37*/  '*',          // Keypad *
+/*38*/  0,            // Alt esquerdo
+/*39*/  ' '           // Space
 };
 
-// Chamado pelo irq1_stub em idt.c
+// Tecla com Shift
+static const char sc_shifted[58] = {
+/*00*/  0,
+/*01*/  27,
+/*02*/  '!','@','#','$','%','^','&','*','(',')',
+/*0C*/  '_','+',
+/*0E*/  '\b',
+/*0F*/  '\t',
+/*10*/  'Q','W','E','R','T','Y','U','I','O','P',
+/*1A*/  '{','}',
+/*1C*/  '\n',
+/*1D*/  0,
+/*1E*/  'A','S','D','F','G','H','J','K','L',
+/*27*/  ':',
+/*28*/  '"',
+/*29*/  '~',
+/*2A*/  0,
+/*2B*/  '|',
+/*2C*/  'Z','X','C','V','B','N','M',
+/*33*/  '<','>','?',
+/*36*/  0,
+/*37*/  '*',
+/*38*/  0,
+/*39*/  ' '
+};
+
+// ----------------------------------------------------------------
+// Estado do teclado
+// ----------------------------------------------------------------
+
+static volatile int shift_held    = 0;  // 1 se shift pressionado
+static volatile int caps_lock     = 0;  // 1 se caps lock ativo
+static volatile int ext_pending   = 0;  // 1 se 0xE0 foi recebido
+
+// ----------------------------------------------------------------
+// IRQ1 handler — chamado pelo stub em idt.c
+// ----------------------------------------------------------------
+
 void keyboard_irq(void) {
     uint8_t sc = inb(0x60);
 
-    if (sc & 0x80) {
-        // Key release — descarta e envia EOI
+    // Prefixo de tecla estendida (setas, Home, End, Del, etc.)
+    if (sc == 0xE0) {
+        ext_pending = 1;
         outb(0x20, 0x20);
         return;
     }
 
-    if (sc < sizeof(scancode_to_ascii)) {
-        char c = scancode_to_ascii[sc];
+    // Key release (bit 7 set)
+    if (sc & 0x80) {
+        uint8_t rel = sc & 0x7F;
+        if (rel == 0x2A || rel == 0x36) shift_held = 0;
+        if (ext_pending) ext_pending = 0;
+        outb(0x20, 0x20);
+        return;
+    }
+
+    // Tecla estendida (segundo byte após 0xE0)
+    if (ext_pending) {
+        ext_pending = 0;
+        int key = 0;
+        switch (sc) {
+            case 0x4B: key = KEY_LEFT;  break;
+            case 0x4D: key = KEY_RIGHT; break;
+            case 0x47: key = KEY_HOME;  break;
+            case 0x4F: key = KEY_END;   break;
+            case 0x53: key = KEY_DEL;   break;
+            case 0x48: key = KEY_UP;    break;
+            case 0x50: key = KEY_DOWN;  break;
+        }
+        if (key) kbuf_put(key);
+        outb(0x20, 0x20);
+        return;
+    }
+
+    // Shift press
+    if (sc == 0x2A || sc == 0x36) { shift_held = 1; outb(0x20, 0x20); return; }
+
+    // Caps Lock toggle
+    if (sc == 0x3A) { caps_lock ^= 1; outb(0x20, 0x20); return; }
+
+    // Tecla normal: decide normal vs shifted
+    if (sc < sizeof(sc_normal)) {
+        char c = sc_normal[sc];
         if (c) {
-            int next = (kbuf_head + 1) % KBUF_SIZE;
-            if (next != kbuf_tail) {   // buffer não cheio
-                kbuf[kbuf_head] = c;
-                kbuf_head = next;
-            }
+            int use_shift = shift_held;
+            // Caps lock inverte shift para letras
+            if (c >= 'a' && c <= 'z') use_shift ^= caps_lock;
+            if (use_shift && sc < sizeof(sc_shifted) && sc_shifted[sc])
+                c = sc_shifted[sc];
+            kbuf_put((int)(unsigned char)c);
         }
     }
 
-    outb(0x20, 0x20);   // EOI para o PIC master
+    outb(0x20, 0x20);
 }
 
-// Bloqueia até ter um caractere no buffer (IRQ faz o trabalho)
-char getchar(void) {
-    while (kbuf_head == kbuf_tail)
-        asm volatile ("hlt");   // dorme até próxima interrupção
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// keyboard_available -- nao bloqueia, retorna 1 se ha tecla
+// ----------------------------------------------------------------
 
-    char c = kbuf[kbuf_tail];
+int keyboard_available(void) {
+    return kbuf_head != kbuf_tail;
+}
+
+// getchar — bloqueia até ter dado no buffer
+// ----------------------------------------------------------------
+
+int getchar(void) {
+    while (kbuf_head == kbuf_tail)
+        asm volatile ("hlt");
+    int val = kbuf[kbuf_tail];
     kbuf_tail = (kbuf_tail + 1) % KBUF_SIZE;
-    return c;
+    return val;
 }

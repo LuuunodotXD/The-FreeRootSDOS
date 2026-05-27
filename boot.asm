@@ -14,7 +14,7 @@ start:
 
     ; Lê 20 setores a partir do setor 2 para 0x1000:0000 = 0x10000
     mov ah, 0x02
-    mov al, 20
+    mov al, 40
     mov ch, 0
     mov cl, 2
     mov dh, 0

@@ -15,10 +15,11 @@ i686-linux-gnu-gcc $CFLAGS -c terminal.c -o terminal.o
 i686-linux-gnu-gcc $CFLAGS -c shell.c    -o shell.o
 i686-linux-gnu-gcc $CFLAGS -c keyboard.c -o keyboard.o
 i686-linux-gnu-gcc $CFLAGS -c idt.c      -o idt.o
+i686-linux-gnu-gcc $CFLAGS -c kmalloc.c  -o kmalloc.o
 
 echo "==> Linkando..."
 i686-linux-gnu-ld -m elf_i386 -T linker.ld -o kernel.elf \
-    entry.o kernel.o terminal.o shell.o keyboard.o idt.o
+    entry.o kernel.o terminal.o shell.o keyboard.o idt.o kmalloc.o
 
 echo "==> Verificando entry point..."
 nm kernel.elf | grep -E "_start|kernel_main|_bss"
@@ -26,7 +27,7 @@ nm kernel.elf | grep -E "_start|kernel_main|_bss"
 echo "==> Gerando binário..."
 objcopy -O binary kernel.elf kernel.bin
 cat boot.bin kernel.bin > os_image.bin
-truncate -s 10752 os_image.bin   # 21 setores x 512 bytes
+truncate -s 20992 os_image.bin   # 21 setores x 512 bytes
 
 echo ""
 echo "Tamanhos:"
