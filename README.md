@@ -1,38 +1,42 @@
 # FreeRootSDOS
 
-**Um sistema operacional mínimo e didático de 32 bits, escrito em C e Assembly, com bootloader próprio, kernel em modo protegido, interrupt IDT/IRQ, terminal VGA e um shell de comandos.**
-*Feito por LuuunoXD*
-
-![Demonstração](https://i.imgur.com/Z3NJtOB.png)  
+Sistema operacional minimalista escrito em C e Assembly, com bootloader próprio e kernel em modo protegido 32-bit.
 
 ## Funcionalidades
 
-- *Bootloader em Assembly (modo real → modo protegido)*
-- *Kernel C com acesso direto à memória VGA (buffer 0xB8000)*
-- *Terminal com rolagem, cores e cursor de hardware*
-- *Shell com linha de comando e edição (backspace, enter)*
-- *Interrupts IDT/IRQ (novidade)*
-- Para ver os comandos (estão na foto também):
-  - `help`   → lista os comandos disponíveis
+- Bootloader em Assembly (modo real → modo protegido)
+- Kernel em C com terminal VGA (cores, scroll, cursor)
+- IDT/IRQ com teclado por interrupção e timer a 1000 Hz
+- Shell interativa com histórico, edição de linha e teclas especiais
+- Sistema de arquivos flat em memória (write, cat, append, del, rename)
+- Heap próprio (`kmalloc`) de 64 KB
 
-## Compilação e Execução
+## Compilar e rodar
 
-### Requisitos
+**Requisitos:** `nasm`, `i686-linux-gnu-gcc`, `i686-linux-gnu-ld`, `qemu-system-i386`
 
-- **NASM** (montador)
-- **GCC** para x86 (compilador cruzado `gcc-i686-linux-gnu binutils-i686-linux-gnu` se estiver em ARM64)
-- **ld** (linker) com suporte a `elf_i386`
-- **QEMU** (emulador opcional, mas recomendado)
+```bash
+./crossb.sh
+qemu-system-i386 -drive format=raw,file=os_image.bin,if=ide
+```
 
-### Para rodar o sistema:
+## Comandos disponíveis
 
- - **Compile tudo usando o crossb.sh (compilação cruzada)**
- - *O build.sh pode servir, mas ainda não foi testado*
- - *Após isso, só siga as instruções que apareceram no terminal*
- - Lembrando, quando ele compila com sucesso, é só iniciar o os_image.bin 
-
-### Aviso: a imagem do sistema está em "Releases", você pode baixar e rodar direto no QEMU
- - Use ela quando não puder ou não quiser compilar o código-fonte
- - *Para rodar no QEMU, use o comando:*
- - **qemu-system-i386 -drive format=raw,file=os_image.bin,if=ide"**
- - (você pode usar -vnc 127.0.0.1:0 para usar o vnc.)"
+| Comando | Descrição |
+|---|---|
+| `help [2]` | lista de comandos (página 1 ou 2) |
+| `clear` | limpa a tela |
+| `reboot` / `poweroff` | reinicia ou desliga |
+| `date` / `uptime` | data/hora e tempo de boot |
+| `color` / `bgcolor` | cor do texto e do fundo (0-F) |
+| `log:<cor> <texto>` | imprime texto colorido |
+| `time` | ativa/desativa hora no prompt |
+| `write <arq> [texto]` | cria ou edita arquivo |
+| `cat <arq>` | exibe conteúdo |
+| `append <arq> <texto>` | adiciona linha ao arquivo |
+| `del <arq>` | remove arquivo |
+| `rename <old> <new>` | renomeia arquivo |
+| `dir` | lista arquivos |
+| `format` | apaga todos os arquivos |
+| `meminfo` | uso do heap |
+| `sleep <ms>` | pausa em milissegundos |

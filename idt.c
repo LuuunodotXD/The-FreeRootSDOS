@@ -181,17 +181,7 @@ void isr_handler(struct regs *r) {
     terminal_writestring("  EDX: "); print_hex(r->edx); terminal_writestring("\n");
     terminal_writestring("ESI: "); print_hex(r->esi);
     terminal_writestring("  EDI: "); print_hex(r->edi); terminal_writestring("\n\n");
-    terminal_writestring("\nPressione Enter para reiniciar (auto em 20s)...\n");
-
-    // Aguarda Enter ou timeout de 20 000 ms
-    uint32_t deadline = ticks + 20000u;
-    while (ticks < deadline) {
-        if (keyboard_available()) {
-            int k = getchar();
-            if (k == '\n') break;
-        }
-        asm volatile ("hlt");
-    }
+    terminal_writestring("\nSistema Travado! Reinicie o computador.\n");
 
     // Reinicia via pulse no controlador de teclado
     while (inb(0x64) & 0x02);
