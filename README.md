@@ -19,6 +19,7 @@ Sistema operacional minimalista escrito em C e Assembly, com bootloader próprio
 ./crossb.sh
 qemu-system-i386 -drive format=raw,file=os_image.bin,if=ide
 ```
+**Aviso: é possível baixar a os_image.bin em Releases, caso não queira compilar.**
 
 ## Comandos disponíveis
 
