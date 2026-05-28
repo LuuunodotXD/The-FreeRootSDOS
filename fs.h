@@ -3,46 +3,49 @@
 
 #include <stdint.h>
 
-#define FS_NAME_LEN  8    // max chars no nome
-#define FS_EXT_LEN   3    // max chars na extensao
-#define FS_MAX_FILES 32
+#define FS_NAME_LEN   8
+#define FS_EXT_LEN    3
+#define FS_MAX        64   // total de entradas (arquivos + diretórios)
+#define FS_ROOT       0    // índice da raiz
+
+#define FS_FREE  0
+#define FS_FILE  1
+#define FS_DIR   2
 
 typedef struct {
-    char     name[FS_NAME_LEN + 1];
-    char     ext [FS_EXT_LEN  + 1];
-    char    *data;    // conteudo alocado via kmalloc (0 se vazio)
-    uint32_t size;    // tamanho do conteudo em bytes
-    uint8_t  used;    // 1 = entrada valida
-} fs_file_t;
+    uint8_t  type;                   // FS_FREE / FS_FILE / FS_DIR
+    uint8_t  parent;                 // índice do diretório pai (0 = raiz)
+    char     name[FS_NAME_LEN + 1]; // minúsculo p/ arquivos, MAIÚSCULO p/ dirs
+    char     ext [FS_EXT_LEN  + 1]; // vazio para dirs
+    char    *data;                   // conteúdo (kmalloc), null para dirs
+    uint32_t size;
+} fs_entry_t;
 
-// Inicializa o FS (zera a tabela)
+// Inicializa o FS
 void        fs_init(void);
 
-// Retorna ponteiro para a tabela interna (para o shell iterar em dir)
-fs_file_t  *fs_table(void);
-int         fs_max(void);   // retorna FS_MAX_FILES
+// Navegação
+uint8_t     fs_cwd(void);            // índice do dir corrente
+const char *fs_cwd_name(void);       // nome do dir corrente ("" se raiz)
+int         fs_cd(const char *name); // 0 ok, -1 não existe
 
-// Cria ou sobrescreve arquivo. content pode ser 0 (arquivo vazio).
-// Retorna 0 ok, -1 tabela cheia, -2 nome invalido
-int  fs_write(const char *name, const char *ext,
-              const char *content, uint32_t size);
-
-// Retorna ponteiro direto para o conteudo (nao aloca copia).
-// Retorna 0 se nao existe ou vazio.
+// Operações
+int  fs_mkdir (const char *name);
+int  fs_write (const char *name, const char *ext,
+               const char *content, uint32_t size);
+int  fs_write_in(uint8_t dir, const char *name, const char *ext,
+                 const char *content, uint32_t size); // grava em dir específico
 const char *fs_read(const char *name, const char *ext);
-
-// Remove arquivo. Retorna 0 ok, -1 nao encontrado.
-int  fs_delete(const char *name, const char *ext);
-
-// Renomeia. Retorna 0 ok, -1 origem nao existe, -2 destino ja existe.
-int  fs_rename(const char *name, const char *ext,
+int  fs_delete(const char *name, const char *ext, int is_dir);
+int  fs_rename(const char *name,    const char *ext,
                const char *newname, const char *newext);
-
-// Apaga todos os arquivos.
 void fs_format(void);
 
-// Utilitario: separa "readme.txt" em name="readme" ext="txt"
-// Se nao houver ponto, ext fica vazio.
+// Acesso à tabela (para dir e copy no shell)
+fs_entry_t *fs_table(void);
+int         fs_max(void);
+
+// Utilitário: separa "readme.txt" → name="readme" ext="txt"
 void fs_split(const char *input, char *name, char *ext);
 
 #endif
