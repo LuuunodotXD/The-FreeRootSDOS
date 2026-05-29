@@ -81,9 +81,10 @@ static const char sc_shifted[58] = {
 // Estado do teclado
 // ----------------------------------------------------------------
 
-static volatile int shift_held    = 0;  // 1 se shift pressionado
-static volatile int caps_lock     = 0;  // 1 se caps lock ativo
-static volatile int ext_pending   = 0;  // 1 se 0xE0 foi recebido
+static volatile int shift_held    = 0;
+static volatile int caps_lock     = 0;
+static volatile int ctrl_held     = 0;  // 1 se Ctrl pressionado
+static volatile int ext_pending   = 0;
 
 // ----------------------------------------------------------------
 // IRQ1 handler — chamado pelo stub em idt.c
@@ -103,6 +104,7 @@ void keyboard_irq(void) {
     if (sc & 0x80) {
         uint8_t rel = sc & 0x7F;
         if (rel == 0x2A || rel == 0x36) shift_held = 0;
+        if (rel == 0x1D) ctrl_held = 0;
         if (ext_pending) ext_pending = 0;
         outb(0x20, 0x20);
         return;
@@ -126,11 +128,21 @@ void keyboard_irq(void) {
         return;
     }
 
+    // Ctrl press (esquerdo = 0x1D)
+    if (sc == 0x1D) { ctrl_held = 1; outb(0x20, 0x20); return; }
+
     // Shift press
     if (sc == 0x2A || sc == 0x36) { shift_held = 1; outb(0x20, 0x20); return; }
 
     // Caps Lock toggle
     if (sc == 0x3A) { caps_lock ^= 1; outb(0x20, 0x20); return; }
+
+    // Ctrl+letra: retorna codigo de controle ASCII (1-26)
+    if (ctrl_held && sc < sizeof(sc_normal)) {
+        char c = sc_normal[sc];
+        if (c >= 'a' && c <= 'z') { kbuf_put(c - 'a' + 1); outb(0x20, 0x20); return; }
+        if (c >= 'A' && c <= 'Z') { kbuf_put(c - 'A' + 1); outb(0x20, 0x20); return; }
+    }
 
     // Tecla normal: decide normal vs shifted
     if (sc < sizeof(sc_normal)) {

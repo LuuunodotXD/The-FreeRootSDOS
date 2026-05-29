@@ -13,4 +13,6 @@ int disk_read(uint32_t lba, uint8_t *buf);
 // Retorna 0 ok, -1 erro
 int disk_write(uint32_t lba, const uint8_t *buf);
 
+void disk_init(void);
+
 #endif

@@ -16,5 +16,9 @@ uint8_t terminal_get_fg(void);
 // sem apagar ou escrever nada — usado pelo shell para Home/End/setas
 void    terminal_cursor_left(int n);
 void    terminal_cursor_right(int n);
+void    terminal_goto(int x, int y);
+void    terminal_clear_row(int y);
+void    terminal_write_at(int x, int y, uint8_t color, const char *str);
+uint8_t terminal_get_bg(void);
 
 #endif

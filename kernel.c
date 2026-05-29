@@ -5,11 +5,13 @@
 #include "fs.h"
 #include "fs_disk.h"
 #include "shell.h"
+#include "disk.h"
 
 void kernel_main(void) {
     terminal_initialize();
     idt_init();
     kmalloc_init();
+    disk_init();
     fs_init();
     fsd_init();
     shell_init();

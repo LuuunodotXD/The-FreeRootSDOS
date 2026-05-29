@@ -9,92 +9,142 @@ start:
     mov sp, 0x7c00
     mov [boot_drive], dl
 
-    mov si, msg_boot
-    call print_string
+    ; Ativa A20 (porta 0x92 + fallback)
+    in al, 0x92
+    test al, 2
+    jnz .a20_ok
+    or al, 2
+    out 0x92, al
+    in al, 0x92
+    test al, 2
+    jnz .a20_ok
+    call a20_kbd
+.a20_ok:
 
-    ; Lê 20 setores a partir do setor 2 para 0x1000:0000 = 0x10000
-    mov ah, 0x02
-    mov al, 80
-    mov ch, 0
-    mov cl, 2
-    mov dh, 0
-    mov dl, [boot_drive]
+    mov si, msg_boot
+    call print
+
+    ; Carrega 127 setores (LBA 1 a 127) para 0x10000
+    mov eax, 1
     mov bx, 0x1000
     mov es, bx
-    xor bx, bx
-    int 0x13
+    xor bx, bx          ; ES:BX = 0x10000
+    mov cx, 127         ; setores (ajuste se necessário)
+    call read_lba
     jc disk_error
 
     mov si, msg_ok
-    call print_string
+    call print
 
-    ; Ativa A20
-    in al, 0x92
-    or al, 2
-    out 0x92, al
-
+    ; Modo protegido
     lgdt [gdt_desc]
     cli
     mov eax, cr0
-    or eax, 1
+    or al, 1
     mov cr0, eax
-    jmp 0x08:protected_mode     ; far jump — flush pipeline
+    jmp 0x08:pmode
 
-; ----------------------------------------------------------------
-; Código 32-bit — DEVE estar antes do times 510 para ficar nos
-; primeiros 512 bytes que o BIOS carrega em 0x7C00
-; ----------------------------------------------------------------
-[bits 32]
-protected_mode:
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
-    mov esp, 0x90000
+; ------------------------------------------------------------
+; read_lba – lê CX setores do LBA em EAX para ES:BX (int 13h AH=42h)
+; ------------------------------------------------------------
+read_lba:
+    pusha
+    mov [dap.lba_low], eax
+    mov [dap.count], cx
+    mov [dap.buf_off], bx
+    mov [dap.buf_seg], es
+    mov si, dap
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    int 0x13
+    jnc .ok
+    ; Reset do controlador e tentativa única
+    mov ah, 0x00
+    int 0x13
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    int 0x13
+    jc .error
+.ok:
+    popa
+    ret
+.error:
+    popa
+    stc
+    ret
 
-    mov word [0xB8000], 0x0F42  ; 'B' branco = modo protegido OK
+dap:
+    db 0x10
+    db 0
+.count: dw 0
+.buf_off: dw 0
+.buf_seg: dw 0
+.lba_low: dd 0
+.lba_high: dd 0
 
-    mov eax, 0x10000
-    call eax
+; ------------------------------------------------------------
+; a20_kbd (fallback)
+; ------------------------------------------------------------
+a20_kbd:
+    call .waitin
+    mov al, 0xAD
+    out 0x64, al
+    call .waitin
+    mov al, 0xD0
+    out 0x64, al
+    call .waitout
+    in al, 0x60
+    push ax
+    call .waitin
+    mov al, 0xD1
+    out 0x64, al
+    call .waitin
+    pop ax
+    or al, 2
+    out 0x60, al
+    call .waitin
+    mov al, 0xAE
+    out 0x64, al
+    ret
+.waitin:
+    in al, 0x64
+    test al, 2
+    jnz .waitin
+    ret
+.waitout:
+    in al, 0x64
+    test al, 1
+    jz .waitout
+    ret
 
-    mov word [0xB8002], 0x0C52  ; 'R' vermelho = kernel retornou
-.hang:
-    hlt
-    jmp .hang
-
-; ----------------------------------------------------------------
-; Rotinas e dados 16-bit
-; ----------------------------------------------------------------
-[bits 16]
-print_string:
+; ------------------------------------------------------------
+; print – imprime string terminada em zero (SI)
+; ------------------------------------------------------------
+print:
     lodsb
     or al, al
     jz .done
     mov ah, 0x0e
     int 0x10
-    jmp print_string
+    jmp print
 .done:
     ret
 
 disk_error:
     mov si, msg_error
-    call print_string
-.hang:
+    call print
+.halt:
     hlt
-    jmp .hang
+    jmp .halt
 
 boot_drive  db 0
-msg_boot    db "Bootloader carregado...", 13, 10, 0
-msg_ok      db "Disco lido OK! Entrando em modo protegido...", 13, 10, 0
-msg_error   db "ERRO: falha na leitura do disco!", 13, 10, 0
+msg_boot    db "FreeRootSDOS", 13, 10, 0
+msg_ok      db "Kernel loaded", 13, 10, 0
+msg_error   db "Disk error", 13, 10, 0
 
-; ----------------------------------------------------------------
 ; GDT
-; ----------------------------------------------------------------
 gdt_start:
-    dq 0                        ; descriptor nulo
+    dq 0
 gdt_code:
     dw 0xFFFF, 0x0000
     db 0x00, 10011010b, 11001111b, 0x00
@@ -106,6 +156,20 @@ gdt_desc:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-; Padding para completar o setor de 512 bytes
+[bits 32]
+pmode:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000
+    call 0x10000
+.hang:
+    hlt
+    jmp .hang
+
+[bits 16]
 times 510 - ($ - $$) db 0
 dw 0xAA55

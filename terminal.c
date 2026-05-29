@@ -17,6 +17,7 @@ static uint8_t current_color(void) { return (bg_color << 4) | fg_color; }
 void terminal_set_fg(uint8_t fg) { fg_color = fg & 0xF; }
 void terminal_set_bg(uint8_t bg) { bg_color = bg & 0xF; }
 uint8_t terminal_get_fg(void)    { return fg_color; }
+uint8_t terminal_get_bg(void)    { return bg_color; }
 
 static void vga_disable_blink(void) {
     inb(0x3DA);
@@ -45,6 +46,28 @@ void terminal_cursor_right(int n) {
         else { cursor_x = 0; cursor_y++; }
     }
     terminal_update_cursor();
+}
+
+
+void terminal_goto(int x, int y) {
+    if (x < 0) x = 0; if (x >= VGA_WIDTH)  x = VGA_WIDTH  - 1;
+    if (y < 0) y = 0; if (y >= VGA_HEIGHT) y = VGA_HEIGHT - 1;
+    cursor_x = x; cursor_y = y;
+    terminal_update_cursor();
+}
+
+// Preenche a linha Y inteira com espacos (cor atual)
+void terminal_clear_row(int y) {
+    uint8_t color = current_color();
+    for (int x = 0; x < VGA_WIDTH; x++)
+        vga_buffer[y * VGA_WIDTH + x] = (color << 8) | ' ';
+}
+
+// Escreve string diretamente na posicao (x,y) sem mover o cursor logico
+// Usado pela barra de status do editor
+void terminal_write_at(int x, int y, uint8_t color, const char *str) {
+    while (*str && x < VGA_WIDTH)
+        vga_buffer[y * VGA_WIDTH + x++] = (color << 8) | (unsigned char)*str++;
 }
 
 void terminal_putchar(char c) {
