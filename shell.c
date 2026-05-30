@@ -327,7 +327,11 @@ static void cmd_cat(const char *arg) {
     drv_split(arg, name, ext);
     const char *data = drv_read(name, ext);
     if (!data) terminal_writestring("Nao encontrado ou vazio.\n");
-    else { terminal_writestring(data); terminal_putchar('\n'); }
+    else {
+        terminal_writestring(data);
+        terminal_putchar('\n');
+        if (on_disk()) kfree((void*)data);
+    }
 }
 
 static void cmd_del(const char *arg) {
@@ -405,12 +409,16 @@ static void cmd_append(const char *arg) {
     uint32_t add_len = 0; while (add[add_len]) add_len++;
     uint32_t new_len = cur_len + (cur_len ? 1 : 0) + add_len;
     char *buf = (char*)kmalloc(new_len + 1);
-    if (!buf) { terminal_writestring("Sem memoria.\n"); return; }
+    if (!buf) {
+        if (cur && on_disk()) kfree((void*)cur);
+        terminal_writestring("Sem memoria.\n"); return;
+    }
     uint32_t pos = 0;
     for (uint32_t j = 0; j < cur_len; j++) buf[pos++] = cur[j];
     if (cur_len) buf[pos++] = '\n';
     for (uint32_t j = 0; j < add_len; j++) buf[pos++] = add[j];
     buf[pos] = '\0';
+    if (cur && on_disk()) kfree((void*)cur);
     int ret = drv_write(name, ext, buf, new_len);
     kfree(buf);
     if (ret == 0) terminal_writestring("Linha adicionada.\n");
@@ -480,6 +488,8 @@ static void cmd_copy_or_move(const char *arg, int do_move) {
     if (dest_drive == 'A') ret = fsd_write_in(dest_dir, name, ext, data, src_size);
     else                   ret = fs_write_in(dest_dir, name, ext, data, src_size);
 
+    if (on_disk()) kfree((void*)data);
+
     if (ret != 0) { terminal_writestring("Erro ao copiar.\n"); return; }
 
     if (do_move) {
@@ -513,8 +523,9 @@ static char *load_script(const char *name) {
     uint32_t len = 0;
     while (data[len]) len++;
     char *copy = (char*)kmalloc(len + 1);
-    if (!copy) return NULL;
+    if (!copy) { if (on_disk()) kfree((void*)data); return NULL; }
     for (uint32_t i = 0; i <= len; i++) copy[i] = data[i];
+    if (on_disk()) kfree((void*)data);
     return copy;
 }
 
@@ -573,6 +584,7 @@ static int execute_binary(const char *name) {
     uint8_t *dest = (uint8_t*)0x20000;
     for (uint32_t i = 0; i < size; i++) dest[i] = data[i];
     
+    if (on_disk()) kfree((void*)data);
     terminal_writestring("Executando...\n");
     asm volatile ("call *%0" : : "r"(0x20000) : "memory");
     terminal_writestring("\nPrograma finalizado.\n");

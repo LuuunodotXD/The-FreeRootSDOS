@@ -24,12 +24,21 @@ start:
     mov si, msg_boot
     call print
 
-    ; Carrega 127 setores (LBA 1 a 127) para 0x10000
+    ; Leitura 1: LBA 1-127 (127 setores) -> 0x1000:0x0000 = 0x10000
     mov eax, 1
     mov bx, 0x1000
     mov es, bx
-    xor bx, bx          ; ES:BX = 0x10000
-    mov cx, 127         ; setores (ajuste se necessário)
+    xor bx, bx
+    mov cx, 127
+    call read_lba
+    jc disk_error
+
+    ; Leitura 2: LBA 128-160 (33 setores) -> 0x1FE0:0x0000 = 0x1FE00
+    mov eax, 128
+    mov bx, 0x1FE0
+    mov es, bx
+    xor bx, bx
+    mov cx, 33
     call read_lba
     jc disk_error
 

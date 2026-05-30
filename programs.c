@@ -275,298 +275,320 @@ static int hex_val(char c) {
     return -1;
 }
 
+
+// ---- Estado do hexdump (compartilhado entre hx_draw e prog_hexdump) ----
+typedef struct {
+    char     *buf;
+    uint32_t  size;
+    uint32_t  pos;
+    uint32_t  top_line;
+    int       dirty;
+} hx_state_t;
+
+static void hx_draw(hx_state_t *hx) {
+    terminal_clear();
+    terminal_write_at(0, 0, 0x0E,
+        "HEX EDITOR - Setas/Home/End/Del, n=insere, !=sai sem salvar, Esc salva e sai");
+    uint32_t lines = (hx->size + 15) / 16;
+    if (lines < 1) lines = 1;
+    for (int i = 0; i < 20; i++) {
+        uint32_t line = hx->top_line + i;
+        if (line >= lines) break;
+        uint32_t addr = line * 16;
+        char addr_str[9]; itoa_hex(addr, addr_str, 8);
+        char line_buf[80]; int p = 0;
+        for (int j = 0; j < 8; j++) line_buf[p++] = addr_str[j];
+        line_buf[p++] = ' ';
+        for (int j = 0; j < 16; j++) {
+            int bi = addr + j;
+            if (bi < (int)hx->size) {
+                uint8_t b = hx->buf[bi];
+                line_buf[p++] = "0123456789ABCDEF"[b >> 4];
+                line_buf[p++] = "0123456789ABCDEF"[b & 0xF];
+            } else { line_buf[p++] = ' '; line_buf[p++] = ' '; }
+            line_buf[p++] = ' ';
+            if (j == 7) line_buf[p++] = ' ';
+        }
+        line_buf[p++] = ' ';
+        for (int j = 0; j < 16; j++) {
+            int bi = addr + j;
+            if (bi < (int)hx->size) {
+                char c = hx->buf[bi];
+                line_buf[p++] = (c >= 32 && c < 127) ? c : '.';
+            } else line_buf[p++] = ' ';
+        }
+        line_buf[p] = '\0';
+        uint8_t color = (addr <= hx->pos && hx->pos < addr+16) ? 0x1E : 0x0F;
+        terminal_write_at(0, i+2, color, line_buf);
+    }
+    int row = (hx->pos / 16) - hx->top_line + 2;
+    int col = 9 + (hx->pos % 16) * 3 + (hx->pos % 16 >= 8 ? 1 : 0);
+    terminal_goto(col, row);
+    // Barra de status
+    char status[80]; int p = 0;
+    status[p++]='P'; status[p++]='o'; status[p++]='s'; status[p++]=':'; status[p++]=' ';
+    char tmp[9]; itoa_hex(hx->pos, tmp, 8);
+    for (int i = 0; i < 8; i++) status[p++] = tmp[i];
+    status[p++]=' '; status[p++]='S'; status[p++]='i'; status[p++]='z'; status[p++]='e'; status[p++]=':';
+    uint32_t n = hx->size; char nstr[12]; int ni = 0;
+    if (!n) { nstr[ni++]='0'; } else { while(n){nstr[ni++]='0'+(n%10);n/=10;} }
+    while (ni-- > 0) status[p++] = nstr[ni];
+    if (hx->dirty) { status[p++]=' '; status[p++]='*'; }
+    status[p] = '\0';
+    terminal_write_at(0, 22, 0x1F, status);
+}
+
 static void prog_hexdump(const char *arg, char drive) {
     if (!arg || !arg[0]) {
-        terminal_writestring("Uso: hexdump <arquivo> (edita hexadecimal)\n");
+        terminal_writestring("Uso: hexdump <arquivo>\n");
         return;
     }
     char name[9], ext[4];
-    if (drive == 'A')
-        fsd_split(arg, name, ext);
-    else
-        fs_split(arg, name, ext);
-    // Carrega ou cria arquivo vazio
+    if (drive == 'A') fsd_split(arg, name, ext);
+    else              fs_split(arg, name, ext);
+
     const char *data = (drive == 'A') ? fsd_read(name, ext) : fs_read(name, ext);
     uint32_t size = 0;
     if (data) while (data[size]) size++;
-    if (!data) {
-        // Cria arquivo vazio
-        if (drive == 'A') {
-            if (fsd_write(name, ext, "", 0) != 0) {
-                terminal_writestring("Erro ao criar arquivo.\n");
-                return;
-            }
-        } else {
-            if (fs_write(name, ext, "", 0) != 0) {
-                terminal_writestring("Erro ao criar arquivo.\n");
-                return;
-            }
-        }
-        data = "";
-        size = 0;
-    }
 
-    // Copia para área editável (com espaço extra para inserções)
     char *buf = (char*)kmalloc(size + 1 + 4096);
-    if (!buf) return;
+    if (!buf) { if (drive == 'A' && data) kfree((void*)data); return; }
     for (uint32_t i = 0; i < size; i++) buf[i] = data[i];
     buf[size] = '\0';
+    if (drive == 'A' && data) kfree((void*)data);
 
     uint8_t old_fg = terminal_get_fg();
     uint8_t old_bg = terminal_get_bg();
-    terminal_clear();
-    terminal_set_fg(0xF);
-    terminal_set_bg(0x0);
 
-    uint32_t pos = 0;
-    uint32_t lines = (size + 15) / 16;
-    if (lines < 1) lines = 1;
-    uint32_t top_line = 0;
-    int ch;
-    int dirty = 0;
-    int hex_pending = 0;   // 0 = esperando primeiro dígito, 1 = esperando segundo
+    hx_state_t hx;
+    hx.buf = buf; hx.size = size; hx.pos = 0;
+    hx.top_line = 0; hx.dirty = 0;
+
+    int ch = 0;
+    int hex_pending = 0;
     int pending_high = 0;
 
-    void draw() {
-        terminal_clear();
-        terminal_write_at(0, 0, 0x0E, "HEX EDITOR - Setas/Home/End/Del, n=insere, !=sai sem salvar, Esc salva e sai");
-        for (int i = 0; i < 20; i++) {
-            uint32_t line = top_line + i;
-            if (line >= lines) break;
-            uint32_t addr = line * 16;
-            char addr_str[9];
-            itoa_hex(addr, addr_str, 8);
-            char line_buf[80];
-            int p = 0;
-            for (int j = 0; j < 8; j++) line_buf[p++] = addr_str[j];
-            line_buf[p++] = ' ';
-            for (int j = 0; j < 16; j++) {
-                int byte_idx = addr + j;
-                if (byte_idx < (int)size) {
-                    uint8_t b = buf[byte_idx];
-                    line_buf[p++] = "0123456789ABCDEF"[b >> 4];
-                    line_buf[p++] = "0123456789ABCDEF"[b & 0xF];
-                } else {
-                    line_buf[p++] = ' ';
-                    line_buf[p++] = ' ';
-                }
-                line_buf[p++] = ' ';
-                if (j == 7) line_buf[p++] = ' ';
-            }
-            line_buf[p++] = ' ';
-            for (int j = 0; j < 16; j++) {
-                int byte_idx = addr + j;
-                if (byte_idx < (int)size) {
-                    char c = buf[byte_idx];
-                    line_buf[p++] = (c >= 32 && c < 127) ? c : '.';
-                } else {
-                    line_buf[p++] = ' ';
-                }
-            }
-            line_buf[p] = '\0';
-            uint8_t color = (addr <= pos && pos < addr+16) ? 0x1E : 0x0F;
-            terminal_write_at(0, i+2, color, line_buf);
-        }
-        int row = (pos / 16) - top_line + 2;
-        int col = 9 + (pos % 16) * 3 + (pos % 16 >= 8 ? 1 : 0);
-        terminal_goto(col, row);
-        char status[80];
-        int p = 0;
-        status[p++] = 'P'; status[p++] = 'o'; status[p++] = 's'; status[p++] = ':'; status[p++] = ' ';
-        char tmp[12];
-        itoa_hex(pos, tmp, 8);
-        for (int i = 0; i < 8; i++) status[p++] = tmp[i];
-        status[p++] = ' ';
-        status[p++] = 'S'; status[p++] = 'i'; status[p++] = 'z'; status[p++] = 'e'; status[p++] = ':';
-        uint32_t n = size;
-        char nstr[12]; int ni=0;
-        do { nstr[ni++] = '0' + (n % 10); n /= 10; } while (n);
-        while (ni--) status[p++] = nstr[ni];
-        if (dirty) { status[p++] = ' '; status[p++] = '*'; }
-        status[p] = '\0';
-        terminal_write_at(0, 22, 0x1F, status);
-    }
-
-    draw();
+    hx_draw(&hx);
 
     while (1) {
         ch = getchar();
+
         if (ch == KEY_ESC) break;  // salva e sai
-        if (ch == '!') {           // sai sem salvar
-            dirty = 0;
-            break;
-        }
+        if (ch == '!') { hx.dirty = 0; break; }  // sai sem salvar
+
+        // Inserir byte 0x00 na posicao atual
         if (ch == 'n' || ch == 'N') {
-            // Inserir novo byte (0x00) na posição atual
-            if (size + 1 >= (uint32_t)(size + 4096)) {
-                terminal_writestring("Arquivo muito grande para inserir.\n");
-                continue;
-            }
-            for (uint32_t i = size; i > pos; i--) buf[i] = buf[i-1];
-            buf[pos] = 0;
-            size++;
-            dirty = 1;
-            lines = (size + 15) / 16;
-            if (top_line > (pos / 16)) top_line = pos / 16;
-            draw();
-            continue;
+            if (hx.size + 1 >= hx.size + 4096) continue;
+            for (uint32_t i = hx.size; i > hx.pos; i--) hx.buf[i] = hx.buf[i-1];
+            hx.buf[hx.pos] = 0;
+            hx.size++;
+            hx.dirty = 1;
+            if (hx.top_line > hx.pos / 16) hx.top_line = hx.pos / 16;
+            hx_draw(&hx); continue;
         }
 
-        // Edição de byte (dois dígitos hexa)
+        // Edicao: dois digitos hex
         if ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
-            int val = hex_val(ch);
-            if (val >= 0) {
-                if (hex_pending == 0) {
-                    pending_high = val;
-                    hex_pending = 1;
-                } else {
-                    int low = val;
-                    int new_byte = (pending_high << 4) | low;
-                    if (pos < size) {
-                        buf[pos] = new_byte;
-                        dirty = 1;
-                    }
-                    hex_pending = 0;
-                    draw();
+            int v = hex_val(ch);
+            if (hex_pending == 0) {
+                pending_high = v; hex_pending = 1;
+            } else {
+                if (hx.pos < hx.size) {
+                    hx.buf[hx.pos] = (char)((pending_high << 4) | v);
+                    hx.dirty = 1;
                 }
+                hex_pending = 0;
+                hx_draw(&hx);
             }
             continue;
         }
 
-        // Navegação
+        // Navegacao
         if (ch == KEY_LEFT) {
-            if (pos > 0) pos--;
-            draw();
+            if (hx.pos > 0) hx.pos--;
+            if (hx.top_line > hx.pos / 16) hx.top_line = hx.pos / 16;
+            hx_draw(&hx);
         } else if (ch == KEY_RIGHT) {
-            if (pos < size) pos++;
-            draw();
+            if (hx.pos < hx.size) hx.pos++;
+            if (hx.pos / 16 >= hx.top_line + 20) hx.top_line = hx.pos / 16 - 19;
+            hx_draw(&hx);
         } else if (ch == KEY_UP) {
-            if (pos >= 16) pos -= 16;
-            if (top_line > (pos / 16)) top_line = pos / 16;
-            draw();
+            if (hx.pos >= 16) hx.pos -= 16;
+            if (hx.top_line > hx.pos / 16) hx.top_line = hx.pos / 16;
+            hx_draw(&hx);
         } else if (ch == KEY_DOWN) {
-            if (pos + 16 < size) pos += 16;
-            else if (pos < size) pos = size - 1;
-            if ((pos / 16) >= top_line + 20) top_line = (pos / 16) - 19;
-            draw();
+            if (hx.pos + 16 < hx.size) hx.pos += 16;
+            else if (hx.size > 0) hx.pos = hx.size - 1;
+            if (hx.pos / 16 >= hx.top_line + 20) hx.top_line = hx.pos / 16 - 19;
+            hx_draw(&hx);
         } else if (ch == KEY_HOME) {
-            pos = 0;
-            top_line = 0;
-            draw();
+            hx.pos = 0; hx.top_line = 0;
+            hx_draw(&hx);
         } else if (ch == KEY_END) {
-            if (size > 0) pos = size - 1;
-            else pos = 0;
-            if (pos >= 20*16) top_line = (pos / 16) - 19; else top_line = 0;
-            draw();
+            if (hx.size > 0) hx.pos = hx.size - 1;
+            hx.top_line = (hx.pos >= 20*16) ? hx.pos/16 - 19 : 0;
+            hx_draw(&hx);
         } else if (ch == KEY_DEL) {
-            if (pos < size) {
-                for (uint32_t i = pos; i < size-1; i++) buf[i] = buf[i+1];
-                size--;
-                dirty = 1;
-                if (pos >= size && size > 0) pos = size - 1;
-                lines = (size + 15) / 16;
-                if (top_line > (pos / 16)) top_line = pos / 16;
-                draw();
+            if (hx.pos < hx.size) {
+                for (uint32_t i = hx.pos; i < hx.size-1; i++) hx.buf[i] = hx.buf[i+1];
+                hx.size--;
+                hx.dirty = 1;
+                if (hx.pos >= hx.size && hx.size > 0) hx.pos = hx.size - 1;
+                if (hx.top_line > hx.pos / 16) hx.top_line = hx.pos / 16;
+                hx_draw(&hx);
             }
-        } else if (ch == '\n') {   // Enter salva e sai
-            break;
         }
     }
 
-    if (dirty) {
-        if (drive == 'A')
-            fsd_write(name, ext, buf, size);
-        else
-            fs_write(name, ext, buf, size);
+    if (hx.dirty) {
+        if (drive == 'A') fsd_write(name, ext, hx.buf, hx.size);
+        else               fs_write(name, ext, hx.buf, hx.size);
         terminal_writestring("Arquivo salvo.\n");
     } else if (ch == '!') {
         terminal_writestring("Edição abortada.\n");
     }
 
     kfree(buf);
-    terminal_clear();
     terminal_set_fg(old_fg);
     terminal_set_bg(old_bg);
+    terminal_clear();
 }
 
-// ----------------------------------------------------------------
-// Calculadora simples (linha de comando)
-// ----------------------------------------------------------------
-static int calc_eval(const char *expr) {
-    // avaliador simples que suporta + - * / e parênteses? Vamos fazer algo básico.
-    // usar algoritmo de precedência
-    int values[32];
-    char ops[32];
-    int vtop = 0, otop = 0;
-    int num = 0;
-    int have_num = 0;
-    const char *p = expr;
-    while (*p) {
-        if (*p >= '0' && *p <= '9') {
-            num = num * 10 + (*p - '0');
-            have_num = 1;
-        } else if (*p == '+' || *p == '-' || *p == '*' || *p == '/') {
-            if (!have_num) return 0x80000000;
-            values[vtop++] = num;
-            num = 0;
-            have_num = 0;
-            while (otop > 0 && ((ops[otop-1] == '*' || ops[otop-1] == '/') ||
-                   (*p == '+' || *p == '-') && (ops[otop-1] == '+' || ops[otop-1] == '-'))) {
-                char op = ops[--otop];
-                int b = values[--vtop];
-                int a = values[--vtop];
-                if (op == '+') values[vtop++] = a + b;
-                else if (op == '-') values[vtop++] = a - b;
-                else if (op == '*') values[vtop++] = a * b;
-                else if (op == '/') { if (b == 0) return 0x80000000; values[vtop++] = a / b; }
-            }
-            ops[otop++] = *p;
-        } else if (*p == ' ') {
-            p++; continue;
-        } else {
-            return 0x80000000;
+
+static int calc_parse_num(const char **pp) {
+    const char *p = *pp;
+    int neg = 0;
+    if (*p == '-') { neg = 1; p++; }
+    int val = 0;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+        while ((*p>='0'&&*p<='9')||(*p>='a'&&*p<='f')||(*p>='A'&&*p<='F')) {
+            int d = (*p>='0'&&*p<='9') ? *p-'0' :
+                    (*p>='a'&&*p<='f') ? *p-'a'+10 : *p-'A'+10;
+            val = val*16+d; p++;
         }
-        p++;
+    } else {
+        while (*p>='0'&&*p<='9') { val=val*10+(*p-'0'); p++; }
     }
-    if (!have_num) return 0x80000000;
-    values[vtop++] = num;
-    while (otop > 0) {
-        char op = ops[--otop];
-        int b = values[--vtop];
-        int a = values[--vtop];
-        if (op == '+') values[vtop++] = a + b;
-        else if (op == '-') values[vtop++] = a - b;
-        else if (op == '*') values[vtop++] = a * b;
-        else if (op == '/') { if (b == 0) return 0x80000000; values[vtop++] = a / b; }
+    *pp = p;
+    return neg ? -val : val;
+}
+
+static int calc_prec(char op) {
+    if (op=='+'||op=='-') return 1;
+    if (op=='*'||op=='/'||op=='%') return 2;
+    if (op=='^') return 3;
+    return 0;
+}
+
+static int calc_pow(int base, int exp) {
+    if (exp<0) return 0;
+    int r=1; while(exp-->0) r*=base; return r;
+}
+
+static int calc_apply(char op, int a, int b, int *err) {
+    if ((op=='/'||op=='%')&&b==0) { *err=1; return 0; }
+    if (op=='+') return a+b;
+    if (op=='-') return a-b;
+    if (op=='*') return a*b;
+    if (op=='/') return a/b;
+    if (op=='%') return a%b;
+    if (op=='^') return calc_pow(a,b);
+    return 0;
+}
+
+static int calc_eval(const char *expr, int *err) {
+    int  vals[32]; int vtop=0;
+    char ops[32];  int otop=0;
+    *err=0;
+    const char *p=expr;
+    int expect_val=1;
+    while (*p) {
+        if (*p==' ') { p++; continue; }
+        if (expect_val && (*p=='-'||(*p>='0'&&*p<='9'))) {
+            if (*p=='-' && !(*(p+1)>='0'&&*(p+1)<='9') && !(*(p+1)=='0')) {
+                ops[otop++]='~'; p++; continue;
+            }
+            if (vtop>=32) { *err=1; return 0; }
+            vals[vtop++]=calc_parse_num(&p);
+            expect_val=0; continue;
+        }
+        if (*p=='(') { ops[otop++]='('; expect_val=1; p++; continue; }
+        if (*p==')') {
+            while (otop>0&&ops[otop-1]!='(') {
+                char op=ops[--otop];
+                if (vtop<2) { *err=1; return 0; }
+                int b=vals[--vtop],a=vals[--vtop];
+                vals[vtop++]=calc_apply(op,a,b,err);
+                if (*err) return 0;
+            }
+            if (otop==0) { *err=1; return 0; }
+            otop--; expect_val=0; p++; continue;
+        }
+        if (*p=='+'||*p=='-'||*p=='*'||*p=='/'||*p=='%'||*p=='^') {
+            char op=*p;
+            int ra=(op=='^');
+            while (otop>0&&ops[otop-1]!='('&&
+                   (ra?calc_prec(ops[otop-1])>calc_prec(op)
+                      :calc_prec(ops[otop-1])>=calc_prec(op))) {
+                char top=ops[--otop];
+                if (top=='~') { if(vtop<1){*err=1;return 0;} vals[vtop-1]=-vals[vtop-1]; }
+                else { if(vtop<2){*err=1;return 0;} int b=vals[--vtop],a=vals[--vtop]; vals[vtop++]=calc_apply(top,a,b,err); if(*err) return 0; }
+            }
+            ops[otop++]=op; expect_val=1; p++; continue;
+        }
+        *err=1; return 0;
     }
-    return values[0];
+    while (otop>0) {
+        char op=ops[--otop];
+        if (op=='(') { *err=1; return 0; }
+        if (op=='~') { if(vtop<1){*err=1;return 0;} vals[vtop-1]=-vals[vtop-1]; }
+        else { if(vtop<2){*err=1;return 0;} int b=vals[--vtop],a=vals[--vtop]; vals[vtop++]=calc_apply(op,a,b,err); if(*err) return 0; }
+    }
+    if (vtop!=1) { *err=1; return 0; }
+    return vals[0];
 }
 
 static void int_to_str(int n, char *buf) {
-    if (n == 0) { buf[0] = '0'; buf[1] = 0; return; }
-    int i = 0;
-    if (n < 0) { buf[i++] = '-'; n = -n; }
-    char tmp[16];
-    int j = 0;
-    while (n) { tmp[j++] = '0' + (n % 10); n /= 10; }
-    while (j--) buf[i++] = tmp[j];
-    buf[i] = 0;
+    if (!n) { buf[0]='0'; buf[1]=0; return; }
+    int i=0; if (n<0) { buf[i++]='-'; n=-n; }
+    char tmp[16]; int j=0;
+    while (n) { tmp[j++]='0'+n%10; n/=10; }
+    while (j-->0) buf[i++]=tmp[j];
+    buf[i]=0;
+}
+
+static void int_to_hex(int n, char *buf) {
+    buf[0]='0'; buf[1]='x';
+    uint32_t u=(uint32_t)n;
+    int shift=28,started=0,i=2;
+    while (shift>=0) {
+        int nib=(u>>shift)&0xF;
+        if (nib||started||shift==0) { buf[i++]="0123456789ABCDEF"[nib]; started=1; }
+        shift-=4;
+    }
+    buf[i]=0;
 }
 
 static void prog_calc(const char *arg) {
     if (!arg || !arg[0]) {
         terminal_writestring("Uso: calc <expressao>\n");
-        terminal_writestring("Ex: calc 2+3*4\n");
+        terminal_writestring("Operadores: + - * / % ^ ( )\n");
+        terminal_writestring("Hex: 0x1F, negativos: -5+3\n");
         return;
     }
-    int res = calc_eval(arg);
-    if (res == 0x80000000) {
-        terminal_writestring("Erro na expressao.\n");
+    int err = 0;
+    int res = calc_eval(arg, &err);
+    if (err) {
+        terminal_writestring("Erro: expressao invalida.\n");
     } else {
-        char buf[32];
+        char buf[32], hexbuf[32];
         int_to_str(res, buf);
+        int_to_hex(res, hexbuf);
         terminal_writestring(buf);
-        terminal_putchar('\n');
+        terminal_writestring("  (");
+        terminal_writestring(hexbuf);
+        terminal_writestring(")\n");
     }
 }
 
