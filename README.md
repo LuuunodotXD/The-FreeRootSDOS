@@ -29,6 +29,7 @@ Para testar compatibilidade com hardware mais antigo:
 ```bash
 qemu-system-i386 -cpu 486 -drive format=raw,file=os_image.bin,if=ide
 ```
+**Aviso: a imagem do sistema está em Releases, é só  baixar e rodar no QEMU, sem precisar compilar.**
 
 ## Comandos
 
