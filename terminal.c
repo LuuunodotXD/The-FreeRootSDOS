@@ -120,3 +120,10 @@ void terminal_clear(void) {
     cursor_x = 0; cursor_y = 0;
     terminal_update_cursor();
 }
+
+// Restaura o terminal após uma troca de modo de vídeo.
+// Não limpa o buffer — apenas reabilita blink e reposiciona o cursor.
+void terminal_resume(void) {
+    vga_disable_blink();
+    terminal_update_cursor();
+}

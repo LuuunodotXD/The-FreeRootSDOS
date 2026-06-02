@@ -62,10 +62,16 @@ static void strcpy_upper(char *dst, const char *src, int max) {
 
 static int valid_name(const char *s, int maxlen) {
     if (!s || !s[0] || strlen(s) > maxlen) return 0;
+    // Permite "." e ".."? Não, são proibidos.
+    if ((s[0] == '.' && s[1] == '\0') || (s[0] == '.' && s[1] == '.' && s[2] == '\0'))
+        return 0;
     for (int i = 0; s[i]; i++) {
         char c = s[i];
+        // Permite ponto apenas no primeiro caractere
+        if (i == 0 && c == '.') continue;
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+              (c >= '0' && c <= '9') || c == '_' || c == '-'))
+            return 0;
     }
     return 1;
 }
@@ -214,6 +220,7 @@ void fsd_init(void) {
 }
 
 uint8_t fsd_cwd(void) { return cwd; }
+void    fsd_set_cwd(uint8_t idx) { cwd = idx; }
 const char *fsd_cwd_name(void) { return table[cwd].name; }
 fsd_entry_t *fsd_table(void) { return table; }
 int fsd_max(void) { return FSD_MAX; }
@@ -334,6 +341,30 @@ const char *fsd_read(const char *name, const char *ext) {
     }
     buf[pos] = '\0';
     return buf; // quem chama deve kfree()
+}
+
+
+const char *fsd_read_idx(int idx) {
+    if (idx < 0 || idx >= FSD_MAX) return 0;
+    if (table[idx].type != FSD_FILE || table[idx].size == 0) return 0;
+    uint32_t size = table[idx].size;
+    char *buf = (char*)kmalloc(size + 1);
+    if (!buf) return 0;
+    uint8_t sector[512];
+    uint32_t pos = 0;
+    for (int s = 0; s < table[idx].num_secs; s++) {
+        if (disk_read(FSD_SECTOR_DATA + table[idx].start_sec + s, sector) != 0) {
+            kfree(buf); return 0;
+        }
+        for (int i = 0; i < 512 && pos < size; i++)
+            buf[pos++] = sector[i];
+    }
+    buf[pos] = '\0';
+    return buf;
+}
+
+void fsd_kfree_read(const char *p) {
+    if (p) kfree((void*)p);
 }
 
 int fsd_delete(const char *name, const char *ext, int is_dir) {

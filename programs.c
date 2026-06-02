@@ -6,6 +6,9 @@
 #include "fs.h"
 #include "fs_disk.h"
 #include "kmalloc.h"
+#include "vga_mode.h"
+#include "balloon.h"
+#include "vga12h.h"
 
 // ----------------------------------------------------------------
 // Utilitários locais
@@ -593,9 +596,36 @@ static void prog_calc(const char *arg) {
 }
 
 // ----------------------------------------------------------------
+// Balloon — interface gráfica
+// ----------------------------------------------------------------
+
+// Conteúdo da janela de boas-vindas do Balloon
+static void draw_balloon_welcome(int x, int y, int w, int h) {
+    (void)w; (void)h;
+    vga12h_string(x + 6, y + 10, "FreeRootSDOS v0.5",        COL_WHITE, COL_BLACK);
+    vga12h_string(x + 6, y + 26, "Interface Balloon v0.1",    COL_WHITE, COL_BLACK);
+    vga12h_string(x + 6, y + 42, "Modo 12h  640x480",         COL_WHITE, COL_BLACK);
+    vga12h_string(x + 6, y + 58, "Feche esta janela p/ sair", COL_WHITE, COL_BLACK);
+}
+
+static void prog_balloon(void) {
+    vga_set_mode12h();
+    balloon_init();
+    balloon_open("Balloon", 80, 60, 380, 120, draw_balloon_welcome);
+    balloon_run();          // retorna quando "Sair" é selecionado ou última janela fecha
+    vga_set_mode03h();      // restaura modo texto + recarrega fonte automaticamente
+    terminal_clear();       // limpa tela para não deixar artefatos do modo gráfico
+    terminal_writestring("Balloon encerrado.\n");
+}
+
+// ----------------------------------------------------------------
 // Dispatcher de programas
 // ----------------------------------------------------------------
 int prog_run(const char *cmd, char drive) {
+    if (pg_strcmpi(cmd, "balloon") == 0) {
+        prog_balloon();
+        return 1;
+    }
     const char *arg;
     if ((arg = pg_startswith(cmd, "edit "))) {
         prog_edit(arg, drive);

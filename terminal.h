@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 void    terminal_initialize(void);
+void    terminal_resume(void);      // restaura cursor após troca de modo VGA
 void    terminal_writestring(const char *str);
 void    terminal_putchar(char c);
 void    terminal_clear(void);

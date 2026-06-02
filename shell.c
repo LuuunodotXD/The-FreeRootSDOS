@@ -1,4 +1,4 @@
-// shell.c
+// shell.c - FreeRootSDOS shell principal
 #include "terminal.h"
 #include "keyboard.h"
 #include "shell.h"
@@ -8,6 +8,8 @@
 #include "fs.h"
 #include "fs_disk.h"
 #include "programs.h"
+#include "tty.h"
+#include "env.h"
 #include <stddef.h>
 
 // Protótipo para parse_and_execute (necessário para run_script)
@@ -23,6 +25,11 @@ static char to_lower(char c) {
 static int strcmpi(const char *a, const char *b) {
     while (*a && *b && to_lower(*a) == to_lower(*b)) { a++; b++; }
     return to_lower(*a) - to_lower(*b);
+}
+
+static const char *strchr(const char *s, int c) {
+    while (*s && *s != (char)c) s++;
+    return (*s == (char)c) ? s : 0;
 }
 
 static const char *startswith(const char *s, const char *p) {
@@ -50,6 +57,13 @@ static void print_uint(uint32_t n) {
 }
 
 static void print_kb(uint32_t b) { print_uint(b / 1024); terminal_writestring(" KB"); }
+
+// ----------------------------------------------------------------
+// Expansão de variáveis de ambiente
+// ----------------------------------------------------------------
+static void expand_variables(const char *src, char *dst, int dst_len) {
+    env_expand(src, dst, dst_len);
+}
 
 // ----------------------------------------------------------------
 // Histórico de comandos
@@ -85,6 +99,7 @@ static const char *hist_get(int idx) {
 // Drive ativo: 'H' = heap RAM, 'A' = disco persistente
 // ----------------------------------------------------------------
 static char active_drive = 'A';
+static int  tty_switch_pending = -1; // -1 = nenhum
 
 static int on_disk(void) { return active_drive == 'A'; }
 
@@ -156,6 +171,7 @@ static void readline(char *buf, int maxlen) {
     char saved[HIST_LEN]; saved[0] = '\0';
     while (1) {
         int k = getchar();
+
         if (k == '\n') {
             buf[len] = '\0';
             terminal_putchar('\n');
@@ -180,6 +196,23 @@ static void readline(char *buf, int maxlen) {
         if (k == KEY_RIGHT){ if (cur < len) { cur++; terminal_cursor_right(1); } continue; }
         if (k == KEY_HOME) { terminal_cursor_left(cur); cur = 0; continue; }
         if (k == KEY_END)  { terminal_cursor_right(len - cur); cur = len; continue; }
+        // Alt+F1-F8: troca terminal
+        if (k >= KEY_ALT_F1 && k <= KEY_ALT_F8) {
+            terminal_cursor_left(cur);
+            for (int i = 0; i < len; i++) terminal_putchar(' ');
+            terminal_cursor_left(len);
+            tty_switch_pending = k - KEY_ALT_F1;
+            buf[0] = '\0';
+            return;
+        }
+        if (k >= KEY_CTRL_ALT_F1 && k <= KEY_CTRL_ALT_F8) {
+            terminal_cursor_left(cur);
+            for (int i = 0; i < len; i++) terminal_putchar(' ');
+            terminal_cursor_left(len);
+            tty_switch_pending = k - KEY_CTRL_ALT_F1 + 8;
+            buf[0] = '\0';
+            return;
+        }
         if (k == KEY_UP || k == KEY_DOWN) {
             if (k == KEY_UP && hist_idx + 1 >= hist_count) continue;
             if (k == KEY_DOWN && hist_idx == -1) continue;
@@ -210,100 +243,189 @@ static void readline(char *buf, int maxlen) {
 }
 
 // ----------------------------------------------------------------
-// Comandos do sistema de arquivos (usam wrappers)
+// Funções auxiliares para dir com opções -a -s
 // ----------------------------------------------------------------
-static void cmd_dir(const char *arg) {
-    int count = 0;
-    uint8_t show_dir = drv_cwd();
-    if (arg && arg[0]) {
-        if (drv_is_disk()) {
-            fsd_entry_t *t = fsd_table();
-            int idx = -1;
-            for (int i = 1; i < fsd_max(); i++) {
-                if (t[i].type != FSD_DIR) continue;
-                const char *a = t[i].name, *b = arg;
-                int eq = 1;
-                while (*a || *b) {
-                    char ca = *a, cb = *b;
-                    if (ca >= 'A' && ca <= 'Z') ca += 32;
-                    if (cb >= 'A' && cb <= 'Z') cb += 32;
-                    if (ca != cb) { eq = 0; break; }
-                    a++; b++;
-                }
-                if (eq) { idx = i; break; }
-            }
-            if (idx < 0) { terminal_writestring("Diretorio nao encontrado.\n"); return; }
-            terminal_writestring(t[idx].name); terminal_writestring(":\n");
-            for (int i = 1; i < fsd_max(); i++) {
-                if (t[i].type != FSD_FILE || t[i].parent != (uint8_t)idx) continue;
-                terminal_writestring(t[i].name);
-                if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
-                terminal_writestring("  "); print_uint(t[i].size); terminal_writestring(" bytes\n");
-                count++;
-            }
-        } else {
-            fs_entry_t *t = fs_table();
-            int idx = -1;
-            for (int i = 1; i < fs_max(); i++) {
-                if (t[i].type != FS_DIR) continue;
-                const char *a = t[i].name, *b = arg;
-                int eq = 1;
-                while (*a || *b) {
-                    char ca = *a, cb = *b;
-                    if (ca >= 'A' && ca <= 'Z') ca += 32;
-                    if (cb >= 'A' && cb <= 'Z') cb += 32;
-                    if (ca != cb) { eq = 0; break; }
-                    a++; b++;
-                }
-                if (eq) { idx = i; break; }
-            }
-            if (idx < 0) { terminal_writestring("Diretorio nao encontrado.\n"); return; }
-            terminal_writestring(t[idx].name); terminal_writestring(":\n");
-            for (int i = 1; i < fs_max(); i++) {
-                if (t[i].type != FS_FILE || t[i].parent != (uint8_t)idx) continue;
-                terminal_writestring(t[i].name);
-                if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
-                terminal_writestring("  "); print_uint(t[i].size); terminal_writestring(" bytes\n");
-                count++;
-            }
-        }
-        if (count == 0) terminal_writestring("Vazio.\n");
-        return;
-    }
-    if (drv_is_disk()) {
+static int is_hidden(const char *name) {
+    return (name[0] == '.');
+}
+
+static void print_indent(int depth) {
+    for (int i = 0; i < depth; i++) terminal_writestring("  ");
+}
+
+static void print_tree(uint8_t parent, int depth, int show_hidden) {
+    if (depth > 16) return;
+    if (on_disk()) {
         fsd_entry_t *t = fsd_table();
-        if (show_dir == FSD_ROOT) {
+        for (int i = 1; i < fsd_max(); i++) {
+            if (t[i].type != FSD_DIR) continue;
+            if (t[i].parent != parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
+            print_indent(depth);
+            terminal_writestring(t[i].name);
+            terminal_writestring("/\n");
+            print_tree(i, depth + 1, show_hidden);
+        }
+        for (int i = 1; i < fsd_max(); i++) {
+            if (t[i].type != FSD_FILE) continue;
+            if (t[i].parent != parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
+            print_indent(depth);
+            terminal_writestring(t[i].name);
+            if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
+            terminal_putchar('\n');
+        }
+    } else {
+        fs_entry_t *t = fs_table();
+        for (int i = 1; i < fs_max(); i++) {
+            if (t[i].type != FS_DIR) continue;
+            if (t[i].parent != parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
+            print_indent(depth);
+            terminal_writestring(t[i].name);
+            terminal_writestring("/\n");
+            print_tree(i, depth + 1, show_hidden);
+        }
+        for (int i = 1; i < fs_max(); i++) {
+            if (t[i].type != FS_FILE) continue;
+            if (t[i].parent != parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
+            print_indent(depth);
+            terminal_writestring(t[i].name);
+            if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
+            terminal_putchar('\n');
+        }
+    }
+}
+
+static void list_flat(uint8_t parent, int show_hidden) {
+    int count = 0;
+    if (on_disk()) {
+        fsd_entry_t *t = fsd_table();
+        if (parent == FSD_ROOT) {
             for (int i = 1; i < fsd_max(); i++) {
                 if (t[i].type != FSD_DIR) continue;
-                terminal_writestring(t[i].name); terminal_writestring("/\n"); count++;
+                if (!show_hidden && is_hidden(t[i].name)) continue;
+                terminal_writestring(t[i].name);
+                terminal_writestring("/\n");
+                count++;
             }
         }
         for (int i = 1; i < fsd_max(); i++) {
-            if (t[i].type != FSD_FILE || t[i].parent != show_dir) continue;
+            if (t[i].type != FSD_FILE) continue;
+            if (t[i].parent != parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
             terminal_writestring(t[i].name);
             if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
-            terminal_writestring("  "); print_uint(t[i].size); terminal_writestring(" bytes\n");
+            terminal_writestring("  ");
+            print_uint(t[i].size);
+            terminal_writestring(" bytes\n");
             count++;
         }
     } else {
         fs_entry_t *t = fs_table();
-        if (show_dir == FS_ROOT) {
+        if (parent == FS_ROOT) {
             for (int i = 1; i < fs_max(); i++) {
                 if (t[i].type != FS_DIR) continue;
-                terminal_writestring(t[i].name); terminal_writestring("/\n"); count++;
+                if (!show_hidden && is_hidden(t[i].name)) continue;
+                terminal_writestring(t[i].name);
+                terminal_writestring("/\n");
+                count++;
             }
         }
         for (int i = 1; i < fs_max(); i++) {
-            if (t[i].type != FS_FILE || t[i].parent != show_dir) continue;
+            if (t[i].type != FS_FILE) continue;
+            if (t[i].parent != parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
             terminal_writestring(t[i].name);
             if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
-            terminal_writestring("  "); print_uint(t[i].size); terminal_writestring(" bytes\n");
+            terminal_writestring("  ");
+            print_uint(t[i].size);
+            terminal_writestring(" bytes\n");
             count++;
         }
     }
     if (count == 0) terminal_writestring("Vazio.\n");
 }
 
+// Comando dir com opções estilo Unix: -a (ocultos), -s (árvore)
+static void cmd_dir(const char *arg) {
+    int show_hidden = 0;
+    int tree_mode = 0;
+    const char *dirname = NULL;
+
+    if (arg) {
+        char buf[256];
+        int i = 0;
+        while (arg[i] && i < 255) { buf[i] = arg[i]; i++; }
+        buf[i] = '\0';
+        char *token = buf;
+        while (token && *token) {
+            char *next = token;
+            while (*next && *next != ' ') next++;
+            if (*next) { *next = '\0'; next++; } else next = NULL;
+            if (token[0] == '-') {
+                for (int j = 1; token[j]; j++) {
+                    if (token[j] == 'a' || token[j] == 'A') show_hidden = 1;
+                    if (token[j] == 's' || token[j] == 'S') tree_mode = 1;
+                }
+            } else {
+                dirname = token;
+            }
+            token = next;
+        }
+    }
+
+    uint8_t show_dir = drv_cwd();
+    if (dirname) {
+        if (on_disk()) {
+            fsd_entry_t *t = fsd_table();
+            int idx = -1;
+            for (int i = 1; i < fsd_max(); i++) {
+                if (t[i].type != FSD_DIR) continue;
+                if (strcmpi(t[i].name, dirname) == 0) { idx = i; break; }
+            }
+            if (idx < 0) {
+                terminal_writestring("Diretorio nao encontrado.\n");
+                return;
+            }
+            show_dir = (uint8_t)idx;
+        } else {
+            fs_entry_t *t = fs_table();
+            int idx = -1;
+            for (int i = 1; i < fs_max(); i++) {
+                if (t[i].type != FS_DIR) continue;
+                if (strcmpi(t[i].name, dirname) == 0) { idx = i; break; }
+            }
+            if (idx < 0) {
+                terminal_writestring("Diretorio nao encontrado.\n");
+                return;
+            }
+            show_dir = (uint8_t)idx;
+        }
+    }
+
+    if (tree_mode) {
+        const char *root_name = (dirname ? dirname : drv_cwd_name());
+        if (root_name && root_name[0]) {
+            terminal_writestring(root_name);
+            terminal_writestring(":\n");
+        } else {
+            terminal_writestring("Raiz:\n");
+        }
+        print_tree(show_dir, 1, show_hidden);
+    } else {
+        if (dirname) {
+            terminal_writestring(dirname);
+            terminal_writestring(":\n");
+        }
+        list_flat(show_dir, show_hidden);
+    }
+}
+
+// ----------------------------------------------------------------
+// Comandos do sistema de arquivos (write, cat, del, rename, append, copy, move, format)
+// ----------------------------------------------------------------
 static void cmd_write(const char *arg) {
     char name[9], ext[4];
     int i = 0;
@@ -327,46 +449,32 @@ static void cmd_cat(const char *arg) {
     drv_split(arg, name, ext);
     const char *data = drv_read(name, ext);
     if (!data) terminal_writestring("Nao encontrado ou vazio.\n");
-    else {
-        terminal_writestring(data);
-        terminal_putchar('\n');
-        if (on_disk()) kfree((void*)data);
-    }
+    else { terminal_writestring(data); terminal_putchar('\n'); }
 }
 
 static void cmd_del(const char *arg) {
     char name[9], ext[4];
     drv_split(arg, name, ext);
     if (ext[0] == '\0') {
-        if (drv_is_disk()) {
+        if (on_disk()) {
             fsd_entry_t *t = fsd_table();
             for (int i = 1; i < fsd_max(); i++) {
                 if (t[i].type != FSD_DIR) continue;
-                const char *a = t[i].name, *b = name;
-                int eq = 1;
-                while (*a || *b) {
-                    char ca = *a, cb = *b;
-                    if (ca >= 'A' && ca <= 'Z') ca += 32;
-                    if (cb >= 'A' && cb <= 'Z') cb += 32;
-                    if (ca != cb) { eq = 0; break; }
-                    a++; b++;
+                if (strcmpi(t[i].name, name) == 0) {
+                    fsd_delete(name, "", 1);
+                    terminal_writestring("Diretorio removido.\n");
+                    return;
                 }
-                if (eq) { fsd_delete(name, "", 1); terminal_writestring("Diretorio removido.\n"); return; }
             }
         } else {
             fs_entry_t *t = fs_table();
             for (int i = 1; i < fs_max(); i++) {
                 if (t[i].type != FS_DIR) continue;
-                const char *a = t[i].name, *b = name;
-                int eq = 1;
-                while (*a || *b) {
-                    char ca = *a, cb = *b;
-                    if (ca >= 'A' && ca <= 'Z') ca += 32;
-                    if (cb >= 'A' && cb <= 'Z') cb += 32;
-                    if (ca != cb) { eq = 0; break; }
-                    a++; b++;
+                if (strcmpi(t[i].name, name) == 0) {
+                    fs_delete(name, "", 1);
+                    terminal_writestring("Diretorio removido.\n");
+                    return;
                 }
-                if (eq) { fs_delete(name, "", 1); terminal_writestring("Diretorio removido.\n"); return; }
             }
         }
     }
@@ -395,7 +503,6 @@ static void cmd_rename(const char *arg) {
     else terminal_writestring("Destino ja existe.\n");
 }
 
-
 static void cmd_append(const char *arg) {
     char name[9], ext[4]; int i = 0;
     while (arg[i] && arg[i] != ' ') i++;
@@ -409,52 +516,41 @@ static void cmd_append(const char *arg) {
     uint32_t add_len = 0; while (add[add_len]) add_len++;
     uint32_t new_len = cur_len + (cur_len ? 1 : 0) + add_len;
     char *buf = (char*)kmalloc(new_len + 1);
-    if (!buf) {
-        if (cur && on_disk()) kfree((void*)cur);
-        terminal_writestring("Sem memoria.\n"); return;
-    }
+    if (!buf) { terminal_writestring("Sem memoria.\n"); return; }
     uint32_t pos = 0;
     for (uint32_t j = 0; j < cur_len; j++) buf[pos++] = cur[j];
     if (cur_len) buf[pos++] = '\n';
     for (uint32_t j = 0; j < add_len; j++) buf[pos++] = add[j];
     buf[pos] = '\0';
-    if (cur && on_disk()) kfree((void*)cur);
     int ret = drv_write(name, ext, buf, new_len);
     kfree(buf);
     if (ret == 0) terminal_writestring("Linha adicionada.\n");
     else terminal_writestring("Erro.\n");
 }
 
-// Encontra indice de um diretorio por nome no drive especificado
 static int find_dir_idx(const char *dname, char drive) {
     if (drive == 'A') {
         fsd_entry_t *t = fsd_table();
         for (int i = 1; i < fsd_max(); i++) {
             if (t[i].type != FSD_DIR) continue;
-            const char *a = t[i].name, *b = dname; int eq = 1;
-            while (*a || *b) { char ca=*a,cb=*b; if(ca>='A'&&ca<='Z')ca+=32; if(cb>='A'&&cb<='Z')cb+=32; if(ca!=cb){eq=0;break;} a++;b++; }
-            if (eq) return i;
+            if (strcmpi(t[i].name, dname) == 0) return i;
         }
     } else {
         fs_entry_t *t = fs_table();
         for (int i = 1; i < fs_max(); i++) {
             if (t[i].type != FS_DIR) continue;
-            const char *a = t[i].name, *b = dname; int eq = 1;
-            while (*a || *b) { char ca=*a,cb=*b; if(ca>='A'&&ca<='Z')ca+=32; if(cb>='A'&&cb<='Z')cb+=32; if(ca!=cb){eq=0;break;} a++;b++; }
-            if (eq) return i;
+            if (strcmpi(t[i].name, dname) == 0) return i;
         }
     }
     return -1;
 }
 
 static void cmd_copy_or_move(const char *arg, int do_move) {
-    // Sintaxe: copy/move arquivo.txt [A:|H:|PASTA|A:PASTA|H:PASTA]
     char fname[16]; int i = 0;
     while (arg[i] && arg[i] != ' ') i++;
     for (int j = 0; j < i && j < 15; j++) fname[j] = arg[j]; fname[i] = '\0';
     if (!fname[0]) {
-        terminal_writestring(do_move ? "Uso: move <arq> [destino]\n"
-                                     : "Uso: copy <arq> [destino]\n");
+        terminal_writestring(do_move ? "Uso: move <arq> [destino]\n" : "Uso: copy <arq> [destino]\n");
         return;
     }
     char name[9], ext[4];
@@ -486,9 +582,7 @@ static void cmd_copy_or_move(const char *arg, int do_move) {
 
     int ret;
     if (dest_drive == 'A') ret = fsd_write_in(dest_dir, name, ext, data, src_size);
-    else                   ret = fs_write_in(dest_dir, name, ext, data, src_size);
-
-    if (on_disk()) kfree((void*)data);
+    else ret = fs_write_in(dest_dir, name, ext, data, src_size);
 
     if (ret != 0) { terminal_writestring("Erro ao copiar.\n"); return; }
 
@@ -505,27 +599,23 @@ static void cmd_format(const char *arg) {
     if (arg && (arg[0] == 'A' || arg[0] == 'a')) target = 'A';
     else if (arg && (arg[0] == 'H' || arg[0] == 'h')) target = 'H';
     if (target == 'A') { fsd_format(); terminal_writestring("A: formatado.\n"); }
-    else               { fs_format();  terminal_writestring("H: formatado.\n"); }
+    else { fs_format();  terminal_writestring("H: formatado.\n"); }
 }
 
 // ----------------------------------------------------------------
-// Funções auxiliares para scripts .cha
+// Funções auxiliares para scripts .cha e binários .bin
 // ----------------------------------------------------------------
 static char *load_script(const char *name) {
     char name_buf[9], ext_buf[4];
     drv_split(name, name_buf, ext_buf);
-    // Se a extensão foi fornecida e não for "cha", não é script
-    if (ext_buf[0] && strcmpi(ext_buf, "cha") != 0)
-        return NULL;
-    // Carrega sempre como extensão .cha (ignora qualquer outra extensão)
+    if (ext_buf[0] && strcmpi(ext_buf, "cha") != 0) return NULL;
     const char *data = drv_read(name_buf, "cha");
     if (!data) return NULL;
     uint32_t len = 0;
     while (data[len]) len++;
     char *copy = (char*)kmalloc(len + 1);
-    if (!copy) { if (on_disk()) kfree((void*)data); return NULL; }
+    if (!copy) return NULL;
     for (uint32_t i = 0; i <= len; i++) copy[i] = data[i];
-    if (on_disk()) kfree((void*)data);
     return copy;
 }
 
@@ -537,54 +627,35 @@ static void run_script(const char *script) {
         while (*p && *p != '\n' && i < (int)sizeof(line)-1) line[i++] = *p++;
         line[i] = '\0';
         if (*p == '\n') p++;
-        if (line[0] != '\0')
-            parse_and_execute(line);
+        if (line[0] != '\0') parse_and_execute(line);
     }
 }
-// Rodar binários compilados
 
 static int execute_binary(const char *name) {
     char name_buf[9], ext_buf[4];
     drv_split(name, name_buf, ext_buf);
-    
-    // Se a extensão for fornecida e não for "bin", não é binário
     if (ext_buf[0] && strcmpi(ext_buf, "bin") != 0) return 0;
-    
     const char *data = drv_read(name_buf, "bin");
     if (!data) return 0;
-    
-    // Obtém o tamanho real do arquivo
     uint32_t size = 0;
     if (on_disk()) {
         fsd_entry_t *t = fsd_table();
-        int idx = -1;
         for (int i = 0; i < fsd_max(); i++) {
-            if (t[i].type != FSD_FILE) continue;
-            if (strcmpi(t[i].name, name_buf) != 0) continue;
-            if (strcmpi(t[i].ext, "bin") != 0) continue;
-            idx = i;
-            break;
+            if (t[i].type == FSD_FILE && strcmpi(t[i].name, name_buf) == 0 && strcmpi(t[i].ext, "bin") == 0) {
+                size = t[i].size; break;
+            }
         }
-        if (idx >= 0) size = t[idx].size;
     } else {
         fs_entry_t *t = fs_table();
-        int idx = -1;
         for (int i = 0; i < fs_max(); i++) {
-            if (t[i].type != FS_FILE) continue;
-            if (strcmpi(t[i].name, name_buf) != 0) continue;
-            if (strcmpi(t[i].ext, "bin") != 0) continue;
-            idx = i;
-            break;
+            if (t[i].type == FS_FILE && strcmpi(t[i].name, name_buf) == 0 && strcmpi(t[i].ext, "bin") == 0) {
+                size = t[i].size; break;
+            }
         }
-        if (idx >= 0) size = t[idx].size;
     }
     if (size == 0) return 0;
-    
-    // Copia para o endereço de carga (0x20000)
     uint8_t *dest = (uint8_t*)0x20000;
     for (uint32_t i = 0; i < size; i++) dest[i] = data[i];
-    
-    if (on_disk()) kfree((void*)data);
     terminal_writestring("Executando...\n");
     asm volatile ("call *%0" : : "r"(0x20000) : "memory");
     terminal_writestring("\nPrograma finalizado.\n");
@@ -597,14 +668,19 @@ static int execute_binary(const char *name) {
 static int execute_command(const char *cmd) {
     if (!cmd || !cmd[0]) return 1;
 
+    // Troca de drive
     if (strcmpi(cmd, "a:") == 0) { active_drive = 'A'; terminal_writestring("Drive A: (disco)\n"); return 1; }
     if (strcmpi(cmd, "h:") == 0) { active_drive = 'H'; terminal_writestring("Drive H: (heap/RAM)\n"); return 1; }
 
-    if (strcmpi(cmd, "clear") == 0) { terminal_clear(); return 1; }
+    // Comandos básicos
+    if (strcmpi(cmd, "clear") == 0) {
+        terminal_clear();
+        return 1;
+    }
     if (strcmpi(cmd, "reboot") == 0) { terminal_writestring("Reiniciando...\n"); reboot(); return 1; }
     if (strcmpi(cmd, "poweroff") == 0) { terminal_writestring("Desligando...\n"); poweroff(); return 1; }
     if (strcmpi(cmd, "info") == 0) {
-        terminal_writestring("FreeRootSDOS v0.4\n");
+        terminal_writestring("FreeRootSDOS v0.5\n");
         terminal_writestring("Drive A: disco persistente | Drive H: heap RAM\n");
         return 1;
     }
@@ -650,9 +726,9 @@ static int execute_command(const char *cmd) {
         terminal_writestring(show_drive ? "Unidade ativada.\n" : "Unidade desativada.\n");
         return 1;
     }
-    // Comando log: suporta log texto (sem cor) e log:X texto (cor específica)
+    // log
     if (startswith(cmd, "log:")) {
-        const char *arg = cmd + 4; // após "log:"
+        const char *arg = cmd + 4;
         int cor = hexdigit(arg[0]);
         if (cor >= 0) {
             const char *text = arg + 1;
@@ -673,6 +749,7 @@ static int execute_command(const char *cmd) {
         terminal_putchar('\n');
         return 1;
     }
+    // cores
     if (startswith(cmd, "color ")) {
         const char *a = startswith(cmd, "color ");
         int v = hexdigit(a[0]);
@@ -684,7 +761,7 @@ static int execute_command(const char *cmd) {
         const char *a = startswith(cmd, "bgcolor ");
         int v = hexdigit(a[0]);
         if (v < 0 || a[1]) terminal_writestring("Uso: bgcolor <0-F>\n");
-        else { terminal_set_bg((uint8_t)v); terminal_clear(); terminal_writestring("Cor alterada.\n"); }
+	else { terminal_set_bg((uint8_t)v); terminal_clear(); terminal_writestring("Cor alterada.\n"); }
         return 1;
     }
     if (strcmpi(cmd, "meminfo") == 0) {
@@ -695,17 +772,17 @@ static int execute_command(const char *cmd) {
         uint32_t disk_total = FSD_DATA_SECTORS * 512u;
         uint32_t disk_used = 0;
         fsd_entry_t *t = fsd_table();
-        for (int i = 1; i < fsd_max(); i++) {
-            if (t[i].type == FSD_FILE) disk_used += t[i].num_secs * 512u;
-        }
+        for (int i = 1; i < fsd_max(); i++) if (t[i].type == FSD_FILE) disk_used += t[i].num_secs * 512u;
         terminal_writestring("Disco total: "); print_kb(disk_total); terminal_putchar('\n');
         terminal_writestring("Disco usado: "); print_kb(disk_used);  terminal_putchar('\n');
         terminal_writestring("Disco livre: "); print_kb(disk_total - disk_used); terminal_putchar('\n');
         return 1;
     }
 
-    if (strcmpi(cmd, "dir") == 0) { cmd_dir(0); return 1; }
-    if (startswith(cmd, "dir ")) { cmd_dir(startswith(cmd, "dir ")); return 1; }
+    // Comando dir com opções estilo Unix
+    if (strcmpi(cmd, "dir") == 0)       { cmd_dir(0); return 1; }
+    if (startswith(cmd, "dir "))         { cmd_dir(startswith(cmd, "dir ")); return 1; }
+    if (startswith(cmd, "dir -"))        { cmd_dir(startswith(cmd, "dir ")); return 1; }
     if (startswith(cmd, "md ")) {
         const char *a = startswith(cmd, "md ");
         if (drv_cwd() != 0) terminal_writestring("md so pode ser usado na raiz.\n");
@@ -732,69 +809,77 @@ static int execute_command(const char *cmd) {
         return 1;
     }
 
+    // Help
     if (strcmpi(cmd, "help") == 0 || startswith(cmd, "help ")) {
         const char *arg = cmd[4] ? cmd + 5 : "1";
         while (*arg == ' ') arg++;
         if (*arg == '2') {
             terminal_writestring("Comandos (2/2):\n");
-            terminal_writestring("  dir [pasta]     - lista conteudo\n");
-            terminal_writestring("  md <nome>       - cria diretorio\n");
-            terminal_writestring("  cd <nome>/..    - navega dirs\n");
+            terminal_writestring("  dir [-a][-s] [pasta] - lista (a=ocultos, s=arvore)\n");
+            terminal_writestring("  md <nome>        - cria diretorio\n");
+            terminal_writestring("  cd <nome>/..     - navega dirs\n");
             terminal_writestring("  write <arq> [txt]\n");
-            terminal_writestring("  cat <arq>       - mostra conteudo\n");
+            terminal_writestring("  cat <arq>        - mostra conteudo\n");
             terminal_writestring("  append <arq> <txt>\n");
             terminal_writestring("  copy/move <arq> [dest]\n");
-            terminal_writestring("  del <arq/dir>   - remove\n");
+            terminal_writestring("  del <arq/dir>    - remove\n");
             terminal_writestring("  rename <old> <new>\n");
-            terminal_writestring("  format [a:/h:]  - formata drive\n");
-            terminal_writestring("  a: / h:         - troca de drive\n");
-            terminal_writestring("  edit <arq>      - editor de texto\n");
-            terminal_writestring("  hexdump <arq>   - editor hexadecimal\n");
-	    terminal_writestring("  calc <exprex>   - calculadora (2+3*4)\n");
+            terminal_writestring("  format [a:/h:]   - formata drive\n");
+            terminal_writestring("  a: / h:          - troca de drive\n");
+            terminal_writestring("  edit <arq>       - editor de texto\n");
+            terminal_writestring("  hexdump <arq>    - editor hexadecimal\n");
+            terminal_writestring("  calc <expr>      - calculadora\n");
         } else {
             terminal_writestring("Comandos (1/2):\n");
-            terminal_writestring("  help [2]        - ajuda\n");
-            terminal_writestring("  clear           - limpa tela\n");
+            terminal_writestring("  help [2]         - ajuda\n");
+            terminal_writestring("  clear            - limpa tela\n");
             terminal_writestring("  reboot/poweroff\n");
-            terminal_writestring("  info            - sobre o sistema\n");
+            terminal_writestring("  info             - sobre o sistema\n");
             terminal_writestring("  date / uptime\n");
             terminal_writestring("  sleep <ms>\n");
-            terminal_writestring("  time            - hora no prompt\n");
-            terminal_writestring("  drive           - unidade no prompt\n");
+            terminal_writestring("  time             - hora no prompt\n");
+            terminal_writestring("  drive            - unidade no prompt\n");
             terminal_writestring("  log <txt>\n");
-            terminal_writestring("  log:<X> <txt>   - cor X (0-F)\n");
+            terminal_writestring("  log:<X> <txt>    - cor X (0-F)\n");
             terminal_writestring("  color/bgcolor <0-F>\n");
             terminal_writestring("  meminfo\n");
-	    terminal_writestring("  arquivo.ext     - roda o arquivo\n");
+            terminal_writestring("  arquivo          - executa .bin ou .cha\n");
         }
         return 1;
     }
 
+    // Programas externos (edit, hexdump, calc)
     if (prog_run(cmd, active_drive)) return 1;
 
-    // Tenta executar como binário .bin
+    // Binário .bin
     if (execute_binary(cmd)) return 1;
 
-    // Tenta executar como script .cha
+    // Script .cha
     char *script = load_script(cmd);
     if (script) {
         run_script(script);
         kfree(script);
         return 1;
-    } else {
-        terminal_writestring("Comando desconhecido: ");
-        terminal_writestring(cmd);
-        terminal_putchar('\n');
-        return 0;
     }
+
+    terminal_writestring("Comando desconhecido: ");
+    terminal_writestring(cmd);
+    terminal_putchar('\n');
+    return 0;
 }
+
 // ----------------------------------------------------------------
-// Parsing de múltiplos comandos separados por ';'
+// Parsing de múltiplos comandos separados por ';' (com expansão de variáveis)
 // ----------------------------------------------------------------
 void parse_and_execute(char *line) {
-    // Trabalha sobre copia para nao corromper a string original
-    char copy[512]; int ci = 0;
-    while (line[ci] && ci < 511) { copy[ci] = line[ci]; ci++; } copy[ci] = '\0';
+    // Primeiro expande variáveis na linha toda
+    char expanded[512];
+    expand_variables(line, expanded, sizeof(expanded));
+
+    char copy[512];
+    int ci = 0;
+    while (expanded[ci] && ci < 511) { copy[ci] = expanded[ci]; ci++; }
+    copy[ci] = '\0';
     char *start = copy;
     char *p = copy;
     while (1) {
@@ -821,12 +906,74 @@ void parse_and_execute(char *line) {
 }
 
 // ----------------------------------------------------------------
+// Salva/restaura estado do shell nos terminais
+// ----------------------------------------------------------------
+static void tty_save_shell_state(void) {
+    tty_t *t = tty_active();
+    t->drive     = active_drive;
+    t->show_time = show_time;
+    t->show_drive= show_drive;
+    t->cwd_disk  = fsd_cwd();
+    t->cwd_heap  = fs_cwd();
+    t->hist_count= hist_count;
+    t->hist_head = hist_head;
+    for (int i = 0; i < HIST_MAX; i++)
+        for (int j = 0; j < HIST_LEN; j++)
+            t->hist[i][j] = hist[i][j];
+}
+
+static void tty_restore_shell_state(void) {
+    tty_t *t = tty_active();
+    active_drive = t->drive;
+    show_time    = t->show_time;
+    show_drive   = t->show_drive;
+    fsd_set_cwd(t->cwd_disk);
+    fs_set_cwd(t->cwd_heap);
+    hist_count   = t->hist_count;
+    hist_head    = t->hist_head;
+    for (int i = 0; i < HIST_MAX; i++)
+        for (int j = 0; j < HIST_LEN; j++)
+            hist[i][j] = t->hist[i][j];
+}
+
+static int do_tty_switch(int n) {
+    if (n == tty_current()) return 0;
+    tty_save_shell_state();
+    tty_save();
+    if (tty_switch(n) != 0) {
+        tty_restore(tty_current());
+        terminal_writestring("Terminal nao disponivel.\n");
+        return -1;
+    }
+    tty_restore_shell_state();
+    return 0;
+}
+
+// ----------------------------------------------------------------
 // Shell principal
 // ----------------------------------------------------------------
 void shell_run(void) {
     char buffer[256];
 
+    // Executa run_cmd do terminal na primeira entrada
+    if (tty_run_init(tty_current())) {
+        const char *rc = tty_active()->run_cmd;
+        if (rc && rc[0]) parse_and_execute((char*)rc);
+    }
+
     while (1) {
+        if (tty_switch_pending >= 0) {
+            int n = tty_switch_pending;
+            tty_switch_pending = -1;
+            if (do_tty_switch(n) == 0) {
+                if (tty_run_init(tty_current())) {
+                    const char *rp = tty_active()->run_cmd;
+                    if (rp && rp[0]) parse_and_execute((char*)rp);
+                }
+            }
+            continue;
+        }
+
         terminal_putchar('\n');
         if (show_time) {
             uint8_t h = bcd_to_bin(rtc_read(0x04));

@@ -84,6 +84,7 @@ static const char sc_shifted[58] = {
 static volatile int shift_held    = 0;
 static volatile int caps_lock     = 0;
 static volatile int ctrl_held     = 0;  // 1 se Ctrl pressionado
+static volatile int alt_held      = 0;  // 1 se Alt pressionado
 static volatile int ext_pending   = 0;
 
 // ----------------------------------------------------------------
@@ -105,6 +106,7 @@ void keyboard_irq(void) {
         uint8_t rel = sc & 0x7F;
         if (rel == 0x2A || rel == 0x36) shift_held = 0;
         if (rel == 0x1D) ctrl_held = 0;
+        if (rel == 0x38) alt_held  = 0;
         if (ext_pending) ext_pending = 0;
         outb(0x20, 0x20);
         return;
@@ -128,6 +130,10 @@ void keyboard_irq(void) {
         return;
     }
 
+
+    // Alt press (esquerdo = 0x38)
+    if (sc == 0x38) { alt_held = 1; outb(0x20, 0x20); return; }
+
     // Ctrl press (esquerdo = 0x1D)
     if (sc == 0x1D) { ctrl_held = 1; outb(0x20, 0x20); return; }
 
@@ -137,11 +143,25 @@ void keyboard_irq(void) {
     // Caps Lock toggle
     if (sc == 0x3A) { caps_lock ^= 1; outb(0x20, 0x20); return; }
 
+    // Alt+Fn e Ctrl+Alt+Fn -> terminais (F1-F8 = scancodes 0x3B-0x42)
+    if (alt_held && sc >= 0x3B && sc <= 0x42) {
+        int fn = sc - 0x3B;
+        kbuf_put(ctrl_held ? (0xB0 + fn) : (0xA0 + fn));
+        outb(0x20, 0x20);
+        return;
+    }
+
     // Ctrl+letra: retorna codigo de controle ASCII (1-26)
     if (ctrl_held && sc < sizeof(sc_normal)) {
         char c = sc_normal[sc];
         if (c >= 'a' && c <= 'z') { kbuf_put(c - 'a' + 1); outb(0x20, 0x20); return; }
         if (c >= 'A' && c <= 'Z') { kbuf_put(c - 'A' + 1); outb(0x20, 0x20); return; }
+    }
+
+    // Alt+F1..F8 → troca de terminal
+    if (alt_held && sc >= 0x3B && sc <= 0x42) {
+        kbuf_put(KEY_ALT_F1 + (sc - 0x3B));
+        outb(0x20, 0x20); return;
     }
 
     // Tecla normal: decide normal vs shifted
@@ -175,6 +195,16 @@ int keyboard_available(void) {
 int getchar(void) {
     while (kbuf_head == kbuf_tail)
         asm volatile ("hlt");
+    int val = kbuf[kbuf_tail];
+    kbuf_tail = (kbuf_tail + 1) % KBUF_SIZE;
+    return val;
+}
+
+// getchar_nonblock — retorna o próximo caractere sem bloquear (-1 se vazio)
+// ----------------------------------------------------------------
+
+int getchar_nonblock(void) {
+    if (kbuf_head == kbuf_tail) return -1;
     int val = kbuf[kbuf_tail];
     kbuf_tail = (kbuf_tail + 1) % KBUF_SIZE;
     return val;

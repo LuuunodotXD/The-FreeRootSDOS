@@ -25,7 +25,8 @@ typedef struct {
 void        fs_init(void);
 
 // Navegação
-uint8_t     fs_cwd(void);            // índice do dir corrente
+uint8_t     fs_cwd(void);
+void        fs_set_cwd(uint8_t idx);            // índice do dir corrente
 const char *fs_cwd_name(void);       // nome do dir corrente ("" se raiz)
 int         fs_cd(const char *name); // 0 ok, -1 não existe
 

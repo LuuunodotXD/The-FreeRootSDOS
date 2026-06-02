@@ -47,10 +47,16 @@ static void fs_normcpy_upper(char *dst, const char *src, int max) {
 
 static int fs_valid(const char *s, int maxlen) {
     if (!s || !s[0] || fs_strlen(s) > maxlen) return 0;
+    // Nomes especiais "." e ".." não são permitidos
+    if ((s[0] == '.' && s[1] == '\0') || (s[0] == '.' && s[1] == '.' && s[2] == '\0'))
+        return 0;
     for (int i = 0; s[i]; i++) {
         char c = s[i];
-        if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||
-              (c>='0'&&c<='9')|| c=='_' || c=='-')) return 0;
+        // Permite ponto apenas no primeiro caractere
+        if (i == 0 && c == '.') continue;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-'))
+            return 0;
     }
     return 1;
 }
@@ -95,6 +101,7 @@ void fs_init(void) {
 }
 
 uint8_t     fs_cwd(void)      { return cwd; }
+void        fs_set_cwd(uint8_t idx) { cwd = idx; }
 const char *fs_cwd_name(void) { return table[cwd].name; }
 fs_entry_t *fs_table(void)    { return table; }
 int         fs_max(void)      { return FS_MAX; }

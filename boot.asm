@@ -45,6 +45,9 @@ start:
     mov si, msg_ok
     call print
 
+    ; Mantém o modo de vídeo padrão do BIOS (modo 3, texto 80x25)
+    ; O modo gráfico 13h é ativado pelo comando "balloon" no kernel
+
     ; Modo protegido
     lgdt [gdt_desc]
     cli

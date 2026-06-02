@@ -3,11 +3,11 @@
 #include "idt.h"
 #include "io.h"
 #include "keyboard.h"
+#include "mouse.h"   // para protótipo mouse_irq
 
 // ----------------------------------------------------------------
 // Estruturas da IDT
 // ----------------------------------------------------------------
-
 struct idt_entry {
     uint16_t offset_low;
     uint16_t selector;
@@ -35,7 +35,6 @@ static void idt_set(uint8_t num, uint32_t handler) {
 // ----------------------------------------------------------------
 // PIC 8259
 // ----------------------------------------------------------------
-
 #define PIC1_CMD  0x20
 #define PIC1_DATA 0x21
 #define PIC2_CMD  0xA0
@@ -51,14 +50,13 @@ static void pic_remap(void) {
     outb(PIC2_DATA, 0x02); io_wait();
     outb(PIC1_DATA, 0x01); io_wait();
     outb(PIC2_DATA, 0x01); io_wait();
-    outb(PIC1_DATA, 0b11111100);
+    outb(PIC1_DATA, 0b11111000); // IRQ0=timer, IRQ1=teclado, IRQ2=cascade PIC2 (mouse)
     outb(PIC2_DATA, 0b11111111);
 }
 
 // ----------------------------------------------------------------
 // PIT / Tick counter (1000 Hz = 1 tick por ms)
 // ----------------------------------------------------------------
-
 #define PIT_CMD   0x43
 #define PIT_DATA  0x40
 #define PIT_HZ    1000u
@@ -83,60 +81,28 @@ void timer_sleep(uint32_t ms) {
 
 // ----------------------------------------------------------------
 // Exceções da CPU (ISRs 0–31)
-//
-// Algumas exceções empurram um error code extra na pilha (EC=1).
-// O stub empurra um dummy 0 para as que não têm, mantendo a pilha
-// uniforme: sempre [dummy/ec, eip, cs, eflags] acima de pusha.
-//
-// O handler C recebe um struct com todos os registradores + info.
 // ----------------------------------------------------------------
-
 struct regs {
-    // Empurrados pelo pusha (ordem inversa)
     uint32_t edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
-    // Empurrados pelo stub
-    uint32_t isr_num;   // número da exceção
-    uint32_t err_code;  // error code (ou 0 se não tem)
-    // Empurrados pela CPU ao entrar na exceção
+    uint32_t isr_num;
+    uint32_t err_code;
     uint32_t eip;
     uint32_t cs;
     uint32_t eflags;
 };
 
 static const char *exception_names[] = {
-    "Division by Zero",          // 0
-    "Debug",                     // 1
-    "Non-Maskable Interrupt",    // 2
-    "Breakpoint",                // 3
-    "Overflow",                  // 4
-    "Bound Range Exceeded",      // 5
-    "Invalid Opcode",            // 6
-    "Device Not Available",      // 7
-    "Double Fault",              // 8
-    "Coprocessor Segment Overrun", // 9
-    "Invalid TSS",               // 10
-    "Segment Not Present",       // 11
-    "Stack-Segment Fault",       // 12
-    "General Protection Fault",  // 13
-    "Page Fault",                // 14
-    "Reserved",                  // 15
-    "x87 Floating-Point",        // 16
-    "Alignment Check",           // 17
-    "Machine Check",             // 18
-    "SIMD Floating-Point",       // 19
-    "Virtualization",            // 20
-    "Control Protection",        // 21
-    "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", "Reserved", // 22-27
-    "Hypervisor Injection",      // 28
-    "VMM Communication",         // 29
-    "Security Exception",        // 30
-    "Reserved"                   // 31
+    "Division by Zero", "Debug", "Non-Maskable Interrupt", "Breakpoint",
+    "Overflow", "Bound Range Exceeded", "Invalid Opcode", "Device Not Available",
+    "Double Fault", "Coprocessor Segment Overrun", "Invalid TSS", "Segment Not Present",
+    "Stack-Segment Fault", "General Protection Fault", "Page Fault", "Reserved",
+    "x87 Floating-Point", "Alignment Check", "Machine Check", "SIMD Floating-Point",
+    "Virtualization", "Control Protection", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Hypervisor Injection", "VMM Communication",
+    "Security Exception", "Reserved"
 };
 
-// Imprime uint32 em hex sem depender de nada externo
 static void print_hex(uint32_t val) {
-    // Acessa VGA diretamente para não depender do terminal (que pode estar corrompido)
-    // Mas usamos terminal_writestring pois estamos em modo protegido seguro
     char buf[11];
     buf[0] = '0'; buf[1] = 'x';
     for (int i = 9; i >= 2; i--) {
@@ -148,21 +114,16 @@ static void print_hex(uint32_t val) {
     terminal_writestring(buf);
 }
 
-// Handler C — chamado por todos os stubs de exceção
 void isr_handler(struct regs *r) {
-    // Barra vermelha de erro: muda cor para branco sobre vermelho
     terminal_set_fg(0xF);
     terminal_set_bg(0x4);
     terminal_clear();
-
     terminal_writestring("*** KERNEL PANIC ***\n\n");
-
     if (r->isr_num < 32) {
         terminal_writestring("Excecao: #");
-        // Imprime numero
         char num[3];
         int n = r->isr_num, i = 0;
-        if (n >= 10) { num[i++] = '0' + n / 10; }
+        if (n >= 10) num[i++] = '0' + n / 10;
         num[i++] = '0' + n % 10;
         num[i] = '\0';
         terminal_writestring(num);
@@ -170,7 +131,6 @@ void isr_handler(struct regs *r) {
         terminal_writestring(exception_names[r->isr_num]);
         terminal_writestring("\n");
     }
-
     terminal_writestring("Error Code: "); print_hex(r->err_code); terminal_writestring("\n");
     terminal_writestring("EIP: ");        print_hex(r->eip);      terminal_writestring("\n");
     terminal_writestring("CS:  ");        print_hex(r->cs);       terminal_writestring("\n");
@@ -182,30 +142,26 @@ void isr_handler(struct regs *r) {
     terminal_writestring("ESI: "); print_hex(r->esi);
     terminal_writestring("  EDI: "); print_hex(r->edi); terminal_writestring("\n\n");
     terminal_writestring("\nSistema Travado! Reinicie o computador.\n");
-
-    // Reinicia via pulse no controlador de teclado
     while (inb(0x64) & 0x02);
     outb(0x64, 0xFE);
     while (1) asm volatile ("hlt");
 }
 
-// Macro para gerar stubs: SEM error code (empurra dummy 0)
 #define ISR_NOERR(n) \
     static void __attribute__((naked)) isr##n(void) { \
         asm volatile ( \
-            "push $0\n\t"        /* dummy error code */ \
-            "push $" #n "\n\t"   /* numero da excecao */ \
+            "push $0\n\t" \
+            "push $" #n "\n\t" \
             "pusha\n\t" \
-            "push %esp\n\t"      /* ponteiro para struct regs */ \
+            "push %esp\n\t" \
             "call isr_handler\n\t" \
             "add $4, %esp\n\t" \
             "popa\n\t" \
-            "add $8, %esp\n\t"   /* remove isr_num e err_code */ \
+            "add $8, %esp\n\t" \
             "iret" \
         ); \
     }
 
-// Macro para stubs COM error code (CPU já empurrou o code)
 #define ISR_ERR(n) \
     static void __attribute__((naked)) isr##n(void) { \
         asm volatile ( \
@@ -220,7 +176,6 @@ void isr_handler(struct regs *r) {
         ); \
     }
 
-// ISRs 0–31 — quais têm error code: 8, 10, 11, 12, 13, 14, 17, 21, 29, 30
 ISR_NOERR(0)  ISR_NOERR(1)  ISR_NOERR(2)  ISR_NOERR(3)
 ISR_NOERR(4)  ISR_NOERR(5)  ISR_NOERR(6)  ISR_NOERR(7)
 ISR_ERR(8)    ISR_NOERR(9)  ISR_ERR(10)   ISR_ERR(11)
@@ -231,15 +186,15 @@ ISR_NOERR(24) ISR_NOERR(25) ISR_NOERR(26) ISR_NOERR(27)
 ISR_NOERR(28) ISR_ERR(29)   ISR_ERR(30)   ISR_NOERR(31)
 
 // ----------------------------------------------------------------
-// IRQ handlers (IRQ0 = timer, IRQ1 = teclado)
+// IRQ handlers (IRQ0 = timer, IRQ1 = teclado, IRQ12 = mouse)
 // ----------------------------------------------------------------
-
 static void timer_handler(void) {
     ticks++;
     outb(PIC1_CMD, PIC_EOI);
 }
 
 void keyboard_irq(void);
+void mouse_irq(void);
 
 static void __attribute__((naked)) irq0_stub(void) {
     asm volatile ("pusha\n\t" "call timer_handler\n\t" "popa\n\t" "iret");
@@ -249,10 +204,13 @@ static void __attribute__((naked)) irq1_stub(void) {
     asm volatile ("pusha\n\t" "call keyboard_irq\n\t" "popa\n\t" "iret");
 }
 
-// ----------------------------------------------------------------
-// Inicialização
-// ----------------------------------------------------------------
+static void __attribute__((naked)) irq12_stub(void) {
+    asm volatile ("pusha\n\t" "call mouse_irq\n\t" "popa\n\t" "iret");
+}
 
+// ----------------------------------------------------------------
+// Inicialização da IDT
+// ----------------------------------------------------------------
 void idt_init(void) {
     for (int i = 0; i < 256; i++) {
         idt[i].offset_low  = 0;
@@ -265,7 +223,7 @@ void idt_init(void) {
     pic_remap();
     pit_init();
 
-    // Registra as 32 exceções da CPU
+    // Exceções
     idt_set(0,  (uint32_t)isr0);  idt_set(1,  (uint32_t)isr1);
     idt_set(2,  (uint32_t)isr2);  idt_set(3,  (uint32_t)isr3);
     idt_set(4,  (uint32_t)isr4);  idt_set(5,  (uint32_t)isr5);
@@ -286,6 +244,10 @@ void idt_init(void) {
     // IRQs
     idt_set(0x20, (uint32_t)irq0_stub);
     idt_set(0x21, (uint32_t)irq1_stub);
+    idt_set(0x2C, (uint32_t)irq12_stub);   // IRQ12 → mouse
+
+    // Desmascara IRQ12 no PIC2 (bit 4)
+    outb(0xA1, inb(0xA1) & ~(1 << 4));
 
     idtp.limit = sizeof(idt) - 1;
     idtp.base  = (uint32_t)&idt;

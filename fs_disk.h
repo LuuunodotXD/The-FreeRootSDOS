@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
-#define FSD_SECTOR_SB      161     // superbloco 128
-#define FSD_SECTOR_TABLE   162     // tabela (4 setores: 129..133) 129
-#define FSD_SECTOR_DATA    166     // dados a partir daqui 133
-#define FSD_DATA_SECTORS   154     // até setor 319 (320-133=187)
+#define FSD_SECTOR_SB      128     // superbloco 128
+#define FSD_SECTOR_TABLE   129     // tabela (4 setores: 129..133)
+#define FSD_SECTOR_DATA    133     // dados a partir daqui
+#define FSD_DATA_SECTORS   187     // até setor 319 (320-133=187)
 
 #define FSD_MAGIC          0x46524453u
 #define FSD_MAX            64
@@ -31,6 +31,7 @@ typedef struct {
 
 void        fsd_init(void);
 uint8_t     fsd_cwd(void);
+void        fsd_set_cwd(uint8_t idx);
 const char *fsd_cwd_name(void);
 int         fsd_cd(const char *name);
 int         fsd_mkdir(const char *name);
@@ -39,6 +40,8 @@ int         fsd_write(const char *name, const char *ext,
 int         fsd_write_in(uint8_t dir, const char *name, const char *ext,
                          const char *content, uint32_t size);
 const char *fsd_read(const char *name, const char *ext);
+const char *fsd_read_idx(int idx);
+void        fsd_kfree_read(const char *p);
 int         fsd_delete(const char *name, const char *ext, int is_dir);
 int         fsd_rename(const char *name, const char *ext,
                        const char *newname, const char *newext);

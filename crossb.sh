@@ -20,11 +20,16 @@ i686-linux-gnu-gcc $CFLAGS -c fs.c       -o fs.o
 i686-linux-gnu-gcc $CFLAGS -c disk.c     -o disk.o
 i686-linux-gnu-gcc $CFLAGS -c fs_disk.c  -o fs_disk.o
 i686-linux-gnu-gcc $CFLAGS -c programs.c -o programs.o
-# e na linha do ld: ... fs.o
+i686-linux-gnu-gcc $CFLAGS -c tty.c      -o tty.o
+i686-linux-gnu-gcc $CFLAGS -c env.c      -o env.o
+i686-linux-gnu-gcc $CFLAGS -c vga12h.c   -o vga12h.o
+i686-linux-gnu-gcc $CFLAGS -c mouse.c    -o mouse.o
+i686-linux-gnu-gcc $CFLAGS -c balloon.c  -o balloon.o
+i686-linux-gnu-gcc $CFLAGS -c vga_mode.c -o vga_mode.o
 
 echo "==> Linkando..."
 i686-linux-gnu-ld -m elf_i386 -T linker.ld -o kernel.elf \
-    entry.o kernel.o terminal.o shell.o keyboard.o idt.o kmalloc.o fs.o disk.o fs_disk.o programs.o
+    entry.o kernel.o terminal.o shell.o keyboard.o idt.o kmalloc.o fs.o disk.o fs_disk.o programs.o tty.o env.o vga12h.o mouse.o balloon.o vga_mode.o
 
 echo "==> Verificando entry point..."
 nm kernel.elf | grep -E "_start|kernel_main|_bss"
