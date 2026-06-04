@@ -12,6 +12,11 @@ static int      cursor_x = 0, cursor_y = 0;
 static uint8_t  fg_color = 0xF;
 static uint8_t  bg_color = 0x0;
 
+// Hook de redirecionamento: quando definido, terminal_putchar desvia
+// toda saída para essa função (usado pelo terminal gráfico Balloon).
+static void (*term_hook)(char) = 0;
+void terminal_set_hook(void (*fn)(char)) { term_hook = fn; }
+
 static uint8_t current_color(void) { return (bg_color << 4) | fg_color; }
 
 void terminal_set_fg(uint8_t fg) { fg_color = fg & 0xF; }
@@ -71,6 +76,7 @@ void terminal_write_at(int x, int y, uint8_t color, const char *str) {
 }
 
 void terminal_putchar(char c) {
+    if (term_hook) { term_hook(c); return; }  // redireciona para terminal gráfico
     uint8_t color = current_color();
     if (c == '\n') {
         cursor_x = 0; cursor_y++;

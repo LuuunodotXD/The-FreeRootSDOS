@@ -9,10 +9,13 @@
 #include "vga_mode.h"
 #include "balloon.h"
 #include "vga12h.h"
+#include "idt.h"
 
 // ----------------------------------------------------------------
 // Utilitários locais
 // ----------------------------------------------------------------
+void reboot(void);
+
 static int pg_strlen(const char *s) { int n=0; while(s[n]) n++; return n; }
 static int pg_strcmpi(const char *a, const char *b) {
     while(*a&&*b) {
@@ -613,9 +616,8 @@ static void prog_balloon(void) {
     balloon_init();
     balloon_open("Balloon", 80, 60, 380, 120, draw_balloon_welcome);
     balloon_run();          // retorna quando "Sair" é selecionado ou última janela fecha
-    vga_set_mode03h();      // restaura modo texto + recarrega fonte automaticamente
-    terminal_clear();       // limpa tela para não deixar artefatos do modo gráfico
-    terminal_writestring("Balloon encerrado.\n");
+    // reiniciar ao invés de tentar sair direto
+    reboot();
 }
 
 // ----------------------------------------------------------------

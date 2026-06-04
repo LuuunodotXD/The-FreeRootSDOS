@@ -33,12 +33,21 @@ start:
     call read_lba
     jc disk_error
 
-    ; Leitura 2: LBA 128-160 (33 setores) -> 0x1FE0:0x0000 = 0x1FE00
+    ; Leitura 2: LBA 128-254 (127 setores) -> 0x1FE0:0x0000 = 0x1FE00
     mov eax, 128
     mov bx, 0x1FE0
     mov es, bx
     xor bx, bx
-    mov cx, 33
+    mov cx, 127
+    call read_lba
+    jc disk_error
+
+    ; Leitura 3: LBA 255-320 (66 setores) -> 0x2DC0:0x0000 = 0x2DC00
+    mov eax, 255
+    mov bx, 0x2DC0
+    mov es, bx
+    xor bx, bx
+    mov cx, 66
     call read_lba
     jc disk_error
 

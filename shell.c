@@ -143,7 +143,28 @@ static int show_drive = 1;
 
 void shell_init(void) {}
 
-static void reboot(void) {
+void reboot(void) {
+    asm volatile ("cli");               // para IRQs para não chegar mais dados do mouse
+
+    // 1. Desabilita o dispositivo auxiliar (mouse) no 8042
+    while (inb(0x64) & 0x02);
+    outb(0x64, 0xA7);                   // Disable Auxiliary Device
+
+    // 2. Drena o buffer de saída do 8042 (dados pendentes do mouse)
+    for (int i = 0; i < 16; i++) {
+        if (!(inb(0x64) & 0x01)) break;
+        inb(0x60);
+    }
+
+    // 3. Restaura o Command Byte do 8042 ao estado de POST:
+    //    IRQ1 on (bit0), System flag (bit2), mouse desabilitado (bit5),
+    //    scan-code translation on (bit6) — assim o próximo boot acha teclado limpo
+    while (inb(0x64) & 0x02);
+    outb(0x64, 0x60);                   // Write Command Byte
+    while (inb(0x64) & 0x02);
+    outb(0x60, 0x65);                   // 0b01100101
+
+    // 4. Pulse na linha de reset da CPU via 8042
     while (inb(0x64) & 0x02);
     outb(0x64, 0xFE);
     while (1) asm volatile ("hlt");
@@ -680,7 +701,7 @@ static int execute_command(const char *cmd) {
     if (strcmpi(cmd, "reboot") == 0) { terminal_writestring("Reiniciando...\n"); reboot(); return 1; }
     if (strcmpi(cmd, "poweroff") == 0) { terminal_writestring("Desligando...\n"); poweroff(); return 1; }
     if (strcmpi(cmd, "info") == 0) {
-        terminal_writestring("FreeRootSDOS v0.5\n");
+        terminal_writestring("FreeRootSDOS v0.5 Ultimate Edition (Interface Balloon)\n");
         terminal_writestring("Drive A: disco persistente | Drive H: heap RAM\n");
         return 1;
     }
@@ -844,6 +865,7 @@ static int execute_command(const char *cmd) {
             terminal_writestring("  color/bgcolor <0-F>\n");
             terminal_writestring("  meminfo\n");
             terminal_writestring("  arquivo          - executa .bin ou .cha\n");
+	    terminal_writestring("  balloon          - inicia a interface grafica\n");
         }
         return 1;
     }

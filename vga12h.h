@@ -39,4 +39,8 @@ int  vga12h_strpx (const char *s);
 void vga12h_save   (int x, int y, int w, int h, uint8_t *buf);
 void vga12h_restore(int x, int y, int w, int h, const uint8_t *buf);
 
+// Tamanho mínimo do buffer para vga12h_save/restore.
+// Formato interno: 4 planos × ((w-1)/8 + 2) bytes/linha × h linhas.
+#define VGA12H_SAVE_SIZE(w, h)  (4 * ((((w) - 1) >> 3) + 2) * (h))
+
 #endif

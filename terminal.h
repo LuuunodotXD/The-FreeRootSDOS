@@ -22,4 +22,8 @@ void    terminal_clear_row(int y);
 void    terminal_write_at(int x, int y, uint8_t color, const char *str);
 uint8_t terminal_get_bg(void);
 
+// Hook de redirecionamento de saída (para terminal gráfico Balloon)
+typedef void (*term_hook_fn)(char);
+void terminal_set_hook(term_hook_fn fn);
+
 #endif

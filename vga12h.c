@@ -139,9 +139,69 @@ void vga12h_vline(int x, int y, int len, uint8_t c) {
 // ----------------------------------------------------------------
 // Retângulo cheio / borda
 // ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// Retângulo cheio — otimizado: gc_solid/gc_restore chamados UMA vez,
+// não por linha. Para rects alinhados a byte (caso mais comum no Balloon)
+// a máscara de bit também é configurada uma só vez.
+// ----------------------------------------------------------------
 void vga12h_rect(int x, int y, int w, int h, uint8_t c) {
-    for (int row = y; row < y + h; row++)
-        vga12h_hline(x, row, w, c);
+    if (w <= 0 || h <= 0) return;
+    if (y < 0)           { h += y; y = 0; }
+    if (y + h > VGA12_H) { h = VGA12_H - y; }
+    if (x < 0)           { w += x; x = 0; }
+    if (x + w > VGA12_W) { w = VGA12_W - x; }
+    if (w <= 0 || h <= 0) return;
+
+    int x1    = x + w - 1;
+    int b0    = x  >> 3;
+    int b1    = x1 >> 3;
+    int lbits = x  & 7;
+    int rbits = (x1 + 1) & 7; // 0 = borda direita alinhada
+
+    gc_solid(c);
+
+    if (lbits == 0 && rbits == 0) {
+        // === Caso ideal: alinhado a byte dos dois lados ===
+        // Uma única configuração de máscara fora do loop de linhas.
+        outb(0x3CE, 0x08); outb(0x3CF, 0xFF);
+        for (int row = y; row < y + h; row++) {
+            volatile uint8_t *base = VRAM + (uint32_t)row * BYTES_PER_ROW;
+            for (int b = b0; b <= b1; b++) base[b] = 0xFF;
+        }
+    } else if (b0 == b1) {
+        // === Byte único por linha (largura ≤ 8 px) ===
+        uint8_t mask = (uint8_t)((0xFF >> lbits) &
+                                  (rbits ? (0xFF << (8 - rbits)) : 0xFF));
+        outb(0x3CE, 0x08); outb(0x3CF, mask);
+        for (int row = y; row < y + h; row++) {
+            volatile uint8_t *p = VRAM + (uint32_t)row * BYTES_PER_ROW + b0;
+            (void)*p; *p = 0xFF;
+        }
+    } else {
+        // === Caso geral: bytes parciais nas bordas + bytes inteiros no meio ===
+        int full0 = lbits ? (b0 + 1) : b0;
+        int full1 = rbits ?  b1      : (b1 + 1); // exclusivo
+        uint8_t ml = lbits ? (uint8_t)(0xFF >> lbits)       : 0;
+        uint8_t mr = rbits ? (uint8_t)(0xFF << (8 - rbits)) : 0;
+
+        for (int row = y; row < y + h; row++) {
+            volatile uint8_t *base = VRAM + (uint32_t)row * BYTES_PER_ROW;
+            if (lbits) {
+                outb(0x3CE, 0x08); outb(0x3CF, ml);
+                volatile uint8_t *p = base + b0; (void)*p; *p = 0xFF;
+            }
+            if (full0 < full1) {
+                outb(0x3CE, 0x08); outb(0x3CF, 0xFF);
+                for (int b = full0; b < full1; b++) base[b] = 0xFF;
+            }
+            if (rbits) {
+                outb(0x3CE, 0x08); outb(0x3CF, mr);
+                volatile uint8_t *p = base + b1; (void)*p; *p = 0xFF;
+            }
+        }
+    }
+
+    gc_restore();
 }
 
 void vga12h_border(int x, int y, int w, int h, uint8_t c) {
@@ -163,31 +223,30 @@ void vga12h_char(int x, int y, char ch, uint8_t fg, uint8_t bg) {
 
     int shift = x & 7;
 
+    // Enable Set/Reset UMA VEZ para o caractere inteiro.
+    // gc_solid() fazia isso em todo laço de linha (2× por linha = 32 outb desperdiçados).
+    outb(0x3CE, 0x01); outb(0x3CF, 0x0F);
+
     for (int row = 0; row < 8; row++) {
         int py = y + row;
         if ((unsigned)py >= VGA12_H) continue;
 
-        // font8x8_data: bit0 = pixel esquerdo; VGA modo 12h: bit7 = pixel esquerdo.
-        // bitrev8 converte a ordem de bits.
         uint8_t vga_fg = bitrev8(g[row]);
         uint8_t vga_bg = (uint8_t)(~vga_fg);
 
         volatile uint8_t *p0 = VRAM + (uint32_t)py * BYTES_PER_ROW + (x >> 3);
 
         if (shift == 0) {
-            // Alinhado: o glifo cabe exatamente em 1 byte
-            gc_solid(fg);
+            // Alinhado: 1 byte por linha — apenas 2 outb por fase fg/bg
+            outb(0x3CE, 0x00); outb(0x3CF, fg);
             outb(0x3CE, 0x08); outb(0x3CF, vga_fg);
             (void)*p0; *p0 = 0xFF;
 
-            gc_solid(bg);
+            outb(0x3CE, 0x00); outb(0x3CF, bg);
             outb(0x3CE, 0x08); outb(0x3CF, vga_bg);
             (void)*p0; *p0 = 0xFF;
         } else {
-            // Desalinhado: glifo cruza dois bytes consecutivos
-            // Pixels do glifo nos dois bytes:
-            //   byte esquerdo: máscara = 0xFF >> shift
-            //   byte direito:  máscara = 0xFF << (8 - shift)
+            // Desalinhado: glifo cruza dois bytes
             uint8_t fg0 = (uint8_t)(vga_fg >> shift);
             uint8_t fg1 = (uint8_t)(vga_fg << (8 - shift));
             uint8_t char_mask0 = (uint8_t)(0xFF >> shift);
@@ -196,16 +255,19 @@ void vga12h_char(int x, int y, char ch, uint8_t fg, uint8_t bg) {
             uint8_t bg1 = (uint8_t)(char_mask1 & ~fg1);
             volatile uint8_t *p1 = p0 + 1;
 
-            gc_solid(fg);
+            outb(0x3CE, 0x00); outb(0x3CF, fg);
             if (fg0) { outb(0x3CE, 0x08); outb(0x3CF, fg0); (void)*p0; *p0 = 0xFF; }
             if (fg1) { outb(0x3CE, 0x08); outb(0x3CF, fg1); (void)*p1; *p1 = 0xFF; }
 
-            gc_solid(bg);
+            outb(0x3CE, 0x00); outb(0x3CF, bg);
             if (bg0) { outb(0x3CE, 0x08); outb(0x3CF, bg0); (void)*p0; *p0 = 0xFF; }
             if (bg1) { outb(0x3CE, 0x08); outb(0x3CF, bg1); (void)*p1; *p1 = 0xFF; }
         }
     }
-    gc_restore();
+
+    // Restaura GC ao estado passivo
+    outb(0x3CE, 0x01); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x08); outb(0x3CF, 0xFF);
 }
 
 // ----------------------------------------------------------------
@@ -230,30 +292,53 @@ int vga12h_strpx(const char *s) {
 // Save: lê plano por plano para reconstruir a cor 4-bit de cada pixel.
 // Restore: reescreve pixel a pixel (velocidade aceitável para cursor pequeno).
 // ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// Salva e restaura retângulo (usados pelo cursor do mouse).
+//
+// Formato do buffer: 4 planos × BPR bytes × h linhas
+//   onde BPR = ((w-1)/8) + 2  (bytes por linha, cobrindo qualquer alinhamento de x)
+//
+// Save: 1 outb de seleção de plano por plano → lê bytes inteiros da VRAM.
+//   Era: (w × h × 4 planos × 2 outb) ≈ 3.700 outb para cursor 18×26.
+//   Agora: apenas 4 × 2 = 8 outb para o cursor inteiro.
+//
+// Restore: Map Mask seleciona plano, write mode 0 grava bytes direto.
+//   Mesma redução de outb.
+//
+// O buffer deve ter pelo menos VGA12H_SAVE_SIZE(w,h) bytes (definido em vga12h.h).
+// ----------------------------------------------------------------
 void vga12h_save(int x, int y, int w, int h, uint8_t *buf) {
-    for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w; col++) {
-            int px = x + col, py = y + row;
-            if ((unsigned)px >= VGA12_W || (unsigned)py >= VGA12_H) {
-                *buf++ = 0;
-                continue;
-            }
-            uint32_t offs   = (uint32_t)py * BYTES_PER_ROW + (px >> 3);
-            uint8_t  bitpos = (uint8_t)(7 - (px & 7));
-            uint8_t  color  = 0;
-            for (int plane = 0; plane < 4; plane++) {
-                outb(0x3CE, 0x04); outb(0x3CF, (uint8_t)plane); // Read Map Select
-                if ((VRAM[offs] >> bitpos) & 1)
-                    color |= (uint8_t)(1 << plane);
-            }
-            *buf++ = color;
+    int b0  = x >> 3;                        // primeiro byte-coluna na VRAM
+    int bpr = ((w - 1) >> 3) + 2;           // bytes por linha (cobre qualquer shift)
+    for (int plane = 0; plane < 4; plane++) {
+        outb(0x3CE, 0x04); outb(0x3CF, (uint8_t)plane); // Read Map Select
+        for (int row = 0; row < h; row++) {
+            int py = y + row;
+            volatile uint8_t *src = VRAM + (uint32_t)py * BYTES_PER_ROW + b0;
+            for (int b = 0; b < bpr; b++)
+                *buf++ = ((unsigned)py < VGA12_H && b0 + b < BYTES_PER_ROW)
+                          ? src[b] : 0;
         }
     }
     outb(0x3CE, 0x04); outb(0x3CF, 0x00); // restaura Read Map para plano 0
 }
 
 void vga12h_restore(int x, int y, int w, int h, const uint8_t *buf) {
-    for (int row = 0; row < h; row++)
-        for (int col = 0; col < w; col++)
-            vga12h_pixel(x + col, y + row, *buf++);
+    int b0  = x >> 3;
+    int bpr = ((w - 1) >> 3) + 2;
+    // Write mode 0 direto: desabilita Set/Reset, bit mask = tudo
+    outb(0x3CE, 0x01); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x08); outb(0x3CF, 0xFF);
+    for (int plane = 0; plane < 4; plane++) {
+        outb(0x3C4, 0x02); outb(0x3C5, (uint8_t)(1 << plane)); // Map Mask = plano N
+        for (int row = 0; row < h; row++) {
+            int py = y + row;
+            volatile uint8_t *dst = VRAM + (uint32_t)py * BYTES_PER_ROW + b0;
+            for (int b = 0; b < bpr; b++) {
+                if ((unsigned)py < VGA12_H && b0 + b < BYTES_PER_ROW) dst[b] = *buf;
+                buf++;
+            }
+        }
+    }
+    outb(0x3C4, 0x02); outb(0x3C5, 0x0F); // Map Mask = todos os planos (estado normal)
 }

@@ -37,7 +37,7 @@ nm kernel.elf | grep -E "_start|kernel_main|_bss"
 echo "==> Gerando binário..."
 objcopy -O binary kernel.elf kernel.bin
 cat boot.bin kernel.bin > os_image.bin
-truncate -s 163840 os_image.bin   # 320 setores x 512 = 160KB (disquete 5.25")   # 21 setores x 512 bytes
+truncate -s 327680 os_image.bin   # 640 setores x 512 = 320 KB (kernel 320 + fs 320)
 
 echo ""
 echo "Tamanhos:"

@@ -19,7 +19,7 @@ void kernel_main(void) {
     tty_init();
     terminal_initialize();
 
-    terminal_writestring("FreeRootSDOS v0.5\n");
+    terminal_writestring("FreeRootSDOS v0.5 Ultimate Edition\n");
     terminal_writestring("Digite 'balloon' para iniciar a interface grafica.\n");
     terminal_writestring("Digite 'help' para ver os comandos.\n\n");
 
