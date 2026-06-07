@@ -225,6 +225,31 @@ const char *fsd_cwd_name(void) { return table[cwd].name; }
 fsd_entry_t *fsd_table(void) { return table; }
 int fsd_max(void) { return FSD_MAX; }
 
+// temporariamente:
+void fsd_cwd_path(char *buf, int maxlen) {
+    if (cwd == FSD_ROOT) { buf[0] = '\0'; return; }
+
+    uint8_t stack[FSD_MAX];
+    int depth = 0;
+    uint8_t cur = cwd;
+
+    while (depth < FSD_MAX) {
+        stack[depth++] = cur;
+        uint8_t par = table[cur].parent;
+        if (par == cur || par == FSD_ROOT) break;
+        cur = par;
+    }
+
+    int pos = 0;
+    for (int i = depth - 1; i >= 0 && pos < maxlen - 2; i--) {
+        buf[pos++] = '/';
+        const char *n = table[stack[i]].name;
+        for (int j = 0; n[j] && pos < maxlen - 2; j++)
+            buf[pos++] = n[j];
+    }
+    buf[pos] = '\0';
+}
+
 void fsd_split(const char *input, char *name, char *ext) {
     const char *dot = 0;
     for (const char *p = input; *p; p++) if (*p == '.') dot = p;

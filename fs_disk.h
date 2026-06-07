@@ -5,8 +5,8 @@
 
 #define FSD_SECTOR_SB      321     // superbloco
 #define FSD_SECTOR_TABLE   322     // tabela (4 setores: 322..325)
-#define FSD_SECTOR_DATA    326     // dados a partir daqui
-#define FSD_DATA_SECTORS   314     // até setor 639 (640-326=314)
+#define FSD_SECTOR_DATA    348     // dados a partir daqui
+#define FSD_DATA_SECTORS   372     // até setor 719 (720-348=372)
 
 #define FSD_MAGIC          0x46524453u
 #define FSD_MAX            64
@@ -33,6 +33,7 @@ void        fsd_init(void);
 uint8_t     fsd_cwd(void);
 void        fsd_set_cwd(uint8_t idx);
 const char *fsd_cwd_name(void);
+void        fsd_cwd_path(char *buf, int maxlen);
 int         fsd_cd(const char *name);
 int         fsd_mkdir(const char *name);
 int         fsd_write(const char *name, const char *ext,

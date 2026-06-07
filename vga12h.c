@@ -211,6 +211,46 @@ void vga12h_border(int x, int y, int w, int h, uint8_t c) {
     vga12h_vline(x + w - 1, y,         h, c);
 }
 
+// Versão interna: não faz setup/restore do GC.
+// Chamada por vga12h_string, que faz o setup UMA vez para toda a string.
+static void vga12h_char_raw(int x, int y, char ch, uint8_t fg, uint8_t bg) {
+    int idx = (unsigned char)ch;
+    if (idx < 32 || idx > 126) idx = 32;
+    const uint8_t *g = &font8x8_data[(idx - 32) * 8];
+    int shift = x & 7;
+
+    for (int row = 0; row < 8; row++) {
+        int py = y + row;
+        if ((unsigned)py >= VGA12_H) continue;
+        uint8_t vga_fg = bitrev8(g[row]);
+        uint8_t vga_bg = (uint8_t)(~vga_fg);
+        volatile uint8_t *p0 = VRAM + (uint32_t)py * BYTES_PER_ROW + (x >> 3);
+
+        if (shift == 0) {
+            outb(0x3CE, 0x00); outb(0x3CF, fg);
+            outb(0x3CE, 0x08); outb(0x3CF, vga_fg);
+            (void)*p0; *p0 = 0xFF;
+            outb(0x3CE, 0x00); outb(0x3CF, bg);
+            outb(0x3CE, 0x08); outb(0x3CF, vga_bg);
+            (void)*p0; *p0 = 0xFF;
+        } else {
+            uint8_t fg0 = (uint8_t)(vga_fg >> shift);
+            uint8_t fg1 = (uint8_t)(vga_fg << (8 - shift));
+            uint8_t char_mask0 = (uint8_t)(0xFF >> shift);
+            uint8_t char_mask1 = (uint8_t)(0xFF << (8 - shift));
+            uint8_t bg0 = (uint8_t)(char_mask0 & ~fg0);
+            uint8_t bg1 = (uint8_t)(char_mask1 & ~fg1);
+            volatile uint8_t *p1 = p0 + 1;
+            outb(0x3CE, 0x00); outb(0x3CF, fg);
+            if (fg0) { outb(0x3CE, 0x08); outb(0x3CF, fg0); (void)*p0; *p0 = 0xFF; }
+            if (fg1) { outb(0x3CE, 0x08); outb(0x3CF, fg1); (void)*p1; *p1 = 0xFF; }
+            outb(0x3CE, 0x00); outb(0x3CF, bg);
+            if (bg0) { outb(0x3CE, 0x08); outb(0x3CF, bg0); (void)*p0; *p0 = 0xFF; }
+            if (bg1) { outb(0x3CE, 0x08); outb(0x3CF, bg1); (void)*p1; *p1 = 0xFF; }
+        }
+    }
+}
+
 // ----------------------------------------------------------------
 // Caractere 8×8
 // Renderiza por linha: 2 writes por linha (fg + bg) no caso alinhado,
@@ -274,21 +314,23 @@ void vga12h_char(int x, int y, char ch, uint8_t fg, uint8_t bg) {
 // String e medição
 // ----------------------------------------------------------------
 void vga12h_string(int x, int y, const char *s, uint8_t fg, uint8_t bg) {
+    if (!*s) return;
+    outb(0x3CE, 0x01); outb(0x3CF, 0x0F);   // Enable Set/Reset — uma vez
     while (*s) {
-        vga12h_char(x, y, *s++, fg, bg);
+        vga12h_char_raw(x, y, *s++, fg, bg);
         x += 8;
     }
+    outb(0x3CE, 0x01); outb(0x3CF, 0x00);   // restaura
+    outb(0x3CE, 0x08); outb(0x3CF, 0xFF);
 }
 
-int vga12h_strpx(const char *s) {
-    int n = 0;
-    while (*s++) n += 8;
-    return n;
+int vga12h_strpx(const char *s) { int n = 0; while 
+    (*s++) n += 8; return n;
 }
 
-// ----------------------------------------------------------------
-// Salva e restaura retângulo (usados pelo cursor do mouse).
-//
+// ---------------------------------------------------------------- 
+// Salva e restaura retângulo (usados pelo cursor 
+// do mouse).//
 // Save: lê plano por plano para reconstruir a cor 4-bit de cada pixel.
 // Restore: reescreve pixel a pixel (velocidade aceitável para cursor pequeno).
 // ----------------------------------------------------------------

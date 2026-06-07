@@ -10,6 +10,13 @@
 #include "programs.h"
 #include "tty.h"
 #include "env.h"
+#include "rtl8139.h"
+#include "net.h"
+#include "arp.h"
+#include "ip.h"
+#include "icmp.h"
+#include "dns.h"
+#include "tcp.h"
 #include <stddef.h>
 
 // Protótipo para parse_and_execute (necessário para run_script)
@@ -54,6 +61,12 @@ static void print_uint(uint32_t n) {
     if (!n) { terminal_putchar('0'); return; }
     while (n) { buf[i++] = '0' + n % 10; n /= 10; }
     while (i--) terminal_putchar(buf[i]);
+}
+
+static void print_hex_byte(uint8_t b) {
+    const char *h = "0123456789ABCDEF";
+    terminal_putchar(h[b >> 4]);
+    terminal_putchar(h[b & 0xF]);
 }
 
 static void print_kb(uint32_t b) { print_uint(b / 1024); terminal_writestring(" KB"); }
@@ -105,6 +118,11 @@ static int on_disk(void) { return active_drive == 'A'; }
 
 static uint8_t     drv_cwd(void)      { return on_disk() ? fsd_cwd()      : fs_cwd(); }
 static const char *drv_cwd_name(void) { return on_disk() ? fsd_cwd_name() : fs_cwd_name(); }
+static void drv_cwd_path(char *buf, int maxlen) {
+    if (on_disk()) fsd_cwd_path(buf, maxlen);
+    else           fs_cwd_path(buf, maxlen);
+}
+
 static int drv_cd(const char *n)      { return on_disk() ? fsd_cd(n)      : fs_cd(n); }
 static int drv_mkdir(const char *n)   { return on_disk() ? fsd_mkdir(n)   : fs_mkdir(n); }
 static int drv_write(const char *name, const char *ext, const char *c, uint32_t s) {
@@ -323,18 +341,17 @@ static void list_flat(uint8_t parent, int show_hidden) {
     int count = 0;
     if (on_disk()) {
         fsd_entry_t *t = fsd_table();
-        if (parent == FSD_ROOT) {
-            for (int i = 1; i < fsd_max(); i++) {
-                if (t[i].type != FSD_DIR) continue;
-                if (!show_hidden && is_hidden(t[i].name)) continue;
-                terminal_writestring(t[i].name);
-                terminal_writestring("/\n");
-                count++;
-            }
+        for (int i = 1; i < fsd_max(); i++) {
+            if (t[i].type != FSD_DIR) continue;
+            if (t[i].parent != (uint8_t)parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
+            terminal_writestring(t[i].name);
+            terminal_writestring("/\n");
+            count++;
         }
         for (int i = 1; i < fsd_max(); i++) {
             if (t[i].type != FSD_FILE) continue;
-            if (t[i].parent != parent) continue;
+            if (t[i].parent != (uint8_t)parent) continue;
             if (!show_hidden && is_hidden(t[i].name)) continue;
             terminal_writestring(t[i].name);
             if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
@@ -345,18 +362,17 @@ static void list_flat(uint8_t parent, int show_hidden) {
         }
     } else {
         fs_entry_t *t = fs_table();
-        if (parent == FS_ROOT) {
-            for (int i = 1; i < fs_max(); i++) {
-                if (t[i].type != FS_DIR) continue;
-                if (!show_hidden && is_hidden(t[i].name)) continue;
-                terminal_writestring(t[i].name);
-                terminal_writestring("/\n");
-                count++;
-            }
+        for (int i = 1; i < fs_max(); i++) {
+            if (t[i].type != FS_DIR) continue;
+            if (t[i].parent != (uint8_t)parent) continue;
+            if (!show_hidden && is_hidden(t[i].name)) continue;
+            terminal_writestring(t[i].name);
+            terminal_writestring("/\n");
+            count++;
         }
         for (int i = 1; i < fs_max(); i++) {
             if (t[i].type != FS_FILE) continue;
-            if (t[i].parent != parent) continue;
+            if (t[i].parent != (uint8_t)parent) continue;
             if (!show_hidden && is_hidden(t[i].name)) continue;
             terminal_writestring(t[i].name);
             if (t[i].ext[0]) { terminal_putchar('.'); terminal_writestring(t[i].ext); }
@@ -701,7 +717,7 @@ static int execute_command(const char *cmd) {
     if (strcmpi(cmd, "reboot") == 0) { terminal_writestring("Reiniciando...\n"); reboot(); return 1; }
     if (strcmpi(cmd, "poweroff") == 0) { terminal_writestring("Desligando...\n"); poweroff(); return 1; }
     if (strcmpi(cmd, "info") == 0) {
-        terminal_writestring("FreeRootSDOS v0.5 Ultimate Edition (Interface Balloon)\n");
+        terminal_writestring("FreeRootSDOS v0.6 Reforged Edition (Interface Balloon)\n");
         terminal_writestring("Drive A: disco persistente | Drive H: heap RAM\n");
         return 1;
     }
@@ -800,20 +816,24 @@ static int execute_command(const char *cmd) {
         return 1;
     }
 
-    // Comando dir com opções estilo Unix
+    // Comando clássicos com opções estilo Unix
     if (strcmpi(cmd, "dir") == 0)       { cmd_dir(0); return 1; }
     if (startswith(cmd, "dir "))         { cmd_dir(startswith(cmd, "dir ")); return 1; }
     if (startswith(cmd, "dir -"))        { cmd_dir(startswith(cmd, "dir ")); return 1; }
     if (startswith(cmd, "md ")) {
         const char *a = startswith(cmd, "md ");
-        if (drv_cwd() != 0) terminal_writestring("md so pode ser usado na raiz.\n");
-        else {
-            int r = drv_mkdir(a);
-            if (r >= 0) terminal_writestring("Diretorio criado.\n");
-            else if (r == -3) terminal_writestring("Ja existe.\n");
-            else if (r == -2) terminal_writestring("Nome invalido.\n");
-            else terminal_writestring("Sem espaco.\n");
-        }
+        int r = drv_mkdir(a);
+        if (r >= 0) terminal_writestring("Diretorio criado.\n");
+        else if (r == -3) terminal_writestring("Ja existe.\n");
+        else if (r == -2) terminal_writestring("Nome invalido.\n");
+        else terminal_writestring("Sem espaco.\n");
+        return 1;
+    }
+    if (strcmpi(cmd, "pwd") == 0) {
+        char pb[64];
+        drv_cwd_path(pb, sizeof(pb));
+        terminal_writestring(pb[0] ? pb : "/");
+        terminal_putchar('\n');
         return 1;
     }
     if (startswith(cmd, "cd ")) { drv_cd(startswith(cmd, "cd ")); return 1; }
@@ -876,6 +896,158 @@ static int execute_command(const char *cmd) {
     // Binário .bin
     if (execute_binary(cmd)) return 1;
 
+    // ---------------------------------------------------------------------------------
+    // Recursos de rede
+    // Comando ifconfig
+    if (strcmpi(cmd, "ifconfig") == 0) {
+        if (!rtl8139_present()) {
+            terminal_writestring("Sem placa de rede RTL8139.\n");
+        } else {
+            uint8_t m[6];
+            rtl8139_get_mac(m);
+            terminal_writestring("eth0  MAC: ");
+            for (int i = 0; i < 6; i++) {
+                print_hex_byte(m[i]);
+                if (i < 5) terminal_putchar(':');
+            }
+            terminal_putchar('\n');
+            terminal_writestring("      Link: UP\n");
+        }
+        return 1;
+    }
+    // Comando arp
+    if (strcmpi(cmd, "arp") == 0) {
+        arp_print_table();
+        return 1;
+    }
+    // Comando arping
+    if (startswith(cmd, "arping ")) {
+        const char *arg = startswith(cmd, "arping ");
+        // Parse IP "a.b.c.d"
+        uint8_t ip[4] = {0};
+        int i = 0, n = 0;
+        while (*arg && n < 4) {
+            if (*arg == '.') { ip[n++] = (uint8_t)i; i = 0; }
+            else if (*arg >= '0' && *arg <= '9') i = i*10 + (*arg - '0');
+            arg++;
+        }
+        ip[n] = (uint8_t)i;
+        terminal_writestring("Resolvendo... ");
+        uint8_t mac[6];
+        if (arp_resolve(ip, mac, 2000)) {
+            const char *h = "0123456789ABCDEF";
+            for (int j = 0; j < 6; j++) {
+                terminal_putchar(h[mac[j] >> 4]);
+                terminal_putchar(h[mac[j] & 0xF]);
+                if (j < 5) terminal_putchar(':');
+            }
+            terminal_putchar('\n');
+        } else {
+            terminal_writestring("Timeout.\n");
+        }
+        return 1;
+    }
+    // Comando ping
+    if (startswith(cmd, "ping ")) {
+        const char *arg = startswith(cmd, "ping ");
+        uint8_t ip[4] = {0};
+
+        // IP direto (começa com dígito) ou hostname
+        if (arg[0] >= '0' && arg[0] <= '9') {
+            int v = 0, n = 0;
+            const char *p = arg;
+            while (*p) {
+                if (*p == '.' && n < 3) { ip[n++] = (uint8_t)v; v = 0; }
+                else if (*p >= '0' && *p <= '9') v = v*10 + (*p-'0');
+                p++;
+            }
+            ip[n] = (uint8_t)v;
+        } else {
+            terminal_writestring("Resolvendo ");
+            terminal_writestring(arg);
+            terminal_writestring("...\n");
+            if (!dns_resolve(arg, ip, 3000)) {
+                terminal_writestring("Falha DNS.\n");
+                return 1;
+            }
+        }
+
+        // Mostra IP e envia 4 pings (código já existente)
+        terminal_writestring("PING ");
+        for (int j = 0; j < 4; j++) {
+            uint8_t b = ip[j];
+            if (b >= 100) terminal_putchar('0' + b/100);
+            if (b >= 10)  terminal_putchar('0' + (b/10)%10);
+            terminal_putchar('0' + b%10);
+            if (j < 3) terminal_putchar('.');
+        }
+        terminal_putchar('\n');
+        for (uint16_t seq = 0; seq < 4; seq++) {
+            int rtt = icmp_ping(ip, seq, 2000);
+            terminal_writestring("seq=");
+            terminal_putchar('0' + seq);
+            if (rtt >= 0) {
+                terminal_writestring(" time=");
+                if (rtt >= 100) terminal_putchar('0' + (rtt/100)%10);
+                if (rtt >= 10)  terminal_putchar('0' + (rtt/10)%10);
+                terminal_putchar('0' + rtt%10);
+                terminal_writestring("ms\n");
+            } else {
+                terminal_writestring(" timeout\n");
+            }
+        }
+        return 1;
+    }
+    // Comando resolve
+    if (startswith(cmd, "resolve ")) {
+        const char *host = startswith(cmd, "resolve ");
+        uint8_t ip[4];
+        terminal_writestring("Resolvendo... ");
+        if (dns_resolve(host, ip, 3000)) {
+            for (int j = 0; j < 4; j++) {
+                uint8_t b = ip[j];
+                if (b >= 100) terminal_putchar('0' + b/100);
+                if (b >= 10)  terminal_putchar('0' + (b/10)%10);
+                terminal_putchar('0' + b%10);
+                if (j < 3) terminal_putchar('.');
+            }
+            terminal_putchar('\n');
+        } else {
+            terminal_writestring("Falha.\n");
+        }
+        return 1;
+    }
+    if (strcmpi(cmd, "tcptest") == 0) {
+        static TcpConn conn;
+        uint8_t ip[4];
+
+        terminal_writestring("Resolvendo freeroot.ne-t.org...\n");
+        if (!dns_resolve("freeroot.ne-t.org", ip, 3000)) {
+            terminal_writestring("DNS falhou.\n"); return 1;
+        }
+
+        terminal_writestring("Conectando na porta 80...\n");
+        if (!tcp_connect(&conn, ip, 80, 5000)) {
+            terminal_writestring("Falha TCP.\n"); return 1;
+        }
+        terminal_writestring("Conectado! Enviando GET...\n");
+
+        const char *req = "GET / HTTP/1.0\r\nHost: freeroot.ne-t.org\r\n\r\n";
+        uint16_t rlen = 0; while (req[rlen]) rlen++;
+       tcp_send(&conn, (const uint8_t *)req, rlen);
+
+        uint8_t buf[512];
+        int n;
+        while ((n = tcp_recv(&conn, buf, 511, 3000)) > 0) {
+            buf[n] = 0;
+            terminal_writestring((char *)buf);
+        }
+        tcp_close(&conn);
+        terminal_putchar('\n');
+        return 1;
+    }
+
+    // Outros
     // Script .cha
     char *script = load_script(cmd);
     if (script) {
@@ -1006,13 +1178,14 @@ void shell_run(void) {
             print_dec2(m); terminal_putchar(':');
             print_dec2(s); terminal_writestring("] ");
         }
-        if (show_drive) {
-            terminal_putchar(active_drive);
-            terminal_putchar(':');
-        }
-        const char *dname = drv_cwd_name();
-        if (dname && dname[0]) terminal_writestring(dname);
-        terminal_writestring("> ");
+	if (show_drive) {
+	    terminal_putchar(active_drive);
+	    terminal_putchar(':');
+	}
+	char pathbuf[64];
+	drv_cwd_path(pathbuf, sizeof(pathbuf));
+	terminal_writestring(pathbuf[0] ? pathbuf : "/");
+	terminal_writestring("> ");
 
         readline(buffer, sizeof(buffer));
         hist_push(buffer);

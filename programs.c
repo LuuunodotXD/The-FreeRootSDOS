@@ -10,6 +10,7 @@
 #include "balloon.h"
 #include "vga12h.h"
 #include "idt.h"
+#include "adlib.h"
 
 // ----------------------------------------------------------------
 // Utilitários locais
@@ -606,7 +607,7 @@ static void prog_calc(const char *arg) {
 static void draw_balloon_welcome(int x, int y, int w, int h) {
     (void)w; (void)h;
     vga12h_string(x + 6, y + 10, "FreeRootSDOS v0.5",        COL_WHITE, COL_BLACK);
-    vga12h_string(x + 6, y + 26, "Interface Balloon v0.1",    COL_WHITE, COL_BLACK);
+    vga12h_string(x + 6, y + 26, "Interface Balloon v0.2",    COL_WHITE, COL_BLACK);
     vga12h_string(x + 6, y + 42, "Modo 12h  640x480",         COL_WHITE, COL_BLACK);
     vga12h_string(x + 6, y + 58, "Feche esta janela p/ sair", COL_WHITE, COL_BLACK);
 }
@@ -639,6 +640,10 @@ int prog_run(const char *cmd, char drive) {
     }
     if ((arg = pg_startswith(cmd, "calc "))) {
         prog_calc(arg);
+        return 1;
+    }
+    if (pg_strcmpi(cmd, "beep") == 0) {
+        adlib_note_on(0, 440, 55, ADLIB_PIANO);
         return 1;
     }
     return 0;

@@ -13,8 +13,8 @@
 #include "fs.h"
 #include "fs_disk.h"
 #include "io.h"
+#include "adlib.h"
 #include <stdint.h>
-
 // ----------------------------------------------------------------
 // Cores
 // ----------------------------------------------------------------
@@ -41,6 +41,11 @@
 #define MENUBAR_H    14
 #define TITLEBAR_H   13
 #define CLOSEBOX_SZ  11
+#define MINBOX_SZ    11          // ← linha nova
+#define MINBOX_OFF   (CLOSEBOX_SZ + 3)   // offset da closebox
+#define RESIZE_SZ    8
+#define WIN_MIN_W    120
+#define WIN_MIN_H    (TITLEBAR_H + 40)
 
 static const struct { int x; const char *label; } menu_items[] = {
     {   6, "Balloon" },
@@ -70,6 +75,7 @@ static int dropdown_open = 0;
 // ----------------------------------------------------------------
 typedef struct {
     int         active;
+    int         minimized;
     int         x, y, w, h;
     char        title[32];
     BalloonDraw draw_fn;
@@ -156,7 +162,6 @@ static void fmt_time_12h(int h, int m, int s, char *buf) {
 #define CUR_SCALE  2
 #define CUR_W  (CUR_LOG_W * CUR_SCALE)
 #define CUR_H  (CUR_LOG_H * CUR_SCALE)
-
 static const uint16_t cur_outline[CUR_LOG_H] = {
     0b110000000, 0b111000000, 0b111100000, 0b111110000,
     0b111111000, 0b111111100, 0b111111110, 0b111110000,
@@ -234,7 +239,13 @@ static int icon_last_clicked = -1;
 #define GT_PR_FG    14
 #define GT_CUR_BG    7
 #define GT_SEP_C     8
+#define GT_HIST_MAX 10
 
+static char  gt_hist[GT_HIST_MAX][GTERM_COLS + 1];
+static int   gt_hist_count = 0;
+static int   gt_hist_head  = 0;
+static int   gt_hist_idx   = -1;
+static char  gt_saved[GTERM_COLS + 1];   // linha salva antes de navegar
 static char  gt_buf[GTERM_ROWS][GTERM_COLS + 1];
 static int   gt_out_row;
 static int   gt_out_col;
@@ -242,6 +253,23 @@ static char  gt_in[GTERM_COLS + 1];
 static int   gt_in_len;
 static int   gt_in_cur;
 static int   gt_win_id = -1;
+static int   gt_dirty_from = 0;
+static int   drag_id    = -1;   // ← linha nova
+static int   drag_ox    = 0;    // ← linha nova
+static int   drag_oy    = 0;    // ← linha nova
+static int   resize_id = -1;
+static int   resize_ox = 0, resize_oy = 0;
+static int   resize_left = 0;  // 1 = arrastando pelo canto esquerdo
+
+// Sobe todas as linhas uma posição e limpa a última
+static void gterm_scroll(void) {
+    for (int r = 0; r < GTERM_ROWS - 1; r++) {
+        int c = 0;
+        while ((gt_buf[r][c] = gt_buf[r + 1][c])) c++;
+    }
+    gt_buf[GTERM_ROWS - 1][0] = 0;
+    gt_dirty_from = 0;  // tudo mudou
+}
 
 static void gterm_hook(char c);
 static void gterm_open(int win_id);
@@ -265,7 +293,7 @@ typedef struct {
 } FileExpState;
 
 static FileExpState fexp;
-static int fexp_win_id = -1;
+static int fexp_win_id  = -1;
 
 static void fexp_load_entries(void);
 static void fexp_open_dir(int idx);
@@ -354,14 +382,33 @@ static void draw_icon(int i) {
 // Terminal gráfico
 // ----------------------------------------------------------------
 static void gterm_hook(char c) {
-    if (c == '\n') { gt_out_col = 0; gt_out_row++; if (gt_out_row >= GTERM_ROWS) gt_out_row = GTERM_ROWS-1; return; }
     if (c == '\r') { gt_out_col = 0; return; }
-    if (c < 32) return;
-    if (gt_out_col >= GTERM_COLS) { gt_out_col = 0; gt_out_row++; }
-    if (gt_out_row < GTERM_ROWS) {
-        gt_buf[gt_out_row][gt_out_col++] = c;
-        gt_buf[gt_out_row][gt_out_col] = 0;
+    if (c < 32 && c != '\n') return;
+
+    if (c == '\n') {
+        gt_out_col = 0;
+        gt_out_row++;
+        if (gt_out_row >= GTERM_ROWS) {
+            gterm_scroll();
+            gt_out_row = GTERM_ROWS - 1;
+        }
+        return;
     }
+
+    // Quebra de linha automática
+    if (gt_out_col >= GTERM_COLS) {
+        gt_out_col = 0;
+        gt_out_row++;
+        if (gt_out_row >= GTERM_ROWS) {
+            gterm_scroll();
+            gt_out_row = GTERM_ROWS - 1;
+        }
+    }
+
+    gt_buf[gt_out_row][gt_out_col++] = c;
+    gt_buf[gt_out_row][gt_out_col]   = 0;
+    if (gt_out_row < gt_dirty_from)
+        gt_dirty_from = gt_out_row;
 }
 
 static void gterm_open(int win_id) {
@@ -372,6 +419,7 @@ static void gterm_open(int win_id) {
     const char *msg = "FreeRootSD/OS  -  Terminal Balloon";
     for (int i = 0; msg[i]; i++) gterm_hook(msg[i]);
     gterm_hook('\n');
+    gt_dirty_from = 0;
     const char *msg2 = "Digite 'help' para ver os comandos disponíveis.";
     for (int i = 0; msg2[i]; i++) gterm_hook(msg2[i]);
     gterm_hook('\n');
@@ -379,8 +427,48 @@ static void gterm_open(int win_id) {
 
 static void gterm_redraw_only(void) {
     if (gt_win_id < 0 || !windows[gt_win_id].active) return;
+    Window *w = &windows[gt_win_id];
+
+    // Coordenadas da área de conteúdo da janela
+    int cx = w->x + 1;
+    int cy = w->y + TITLEBAR_H + 1;
+    int cw = w->w - 2;
+
     cursor_erase();
-    draw_window(gt_win_id);
+
+    // Redesenha só as linhas de output que mudaram
+    if (gt_dirty_from < GTERM_ROWS) {
+        int dy = cy + GT_PAD_V + gt_dirty_from * GT_LH;
+        int dh = (GTERM_ROWS - gt_dirty_from) * GT_LH;
+        vga12h_rect(cx, dy, cw, dh, GT_BG);
+        for (int r = gt_dirty_from; r < GTERM_ROWS; r++) {
+            if (!gt_buf[r][0]) continue;
+            vga12h_string(cx + GT_PAD, cy + GT_PAD_V + r * GT_LH,
+                          gt_buf[r], GT_FG, GT_BG);
+        }
+        gt_dirty_from = GTERM_ROWS;
+    }
+
+    // Redesenha só a linha de input (sempre, é barato)
+    int sep_y  = cy + GT_PAD_V + GTERM_ROWS * GT_LH + 1;
+    int in_y   = sep_y + 3;
+    int in_w   = cw - GT_PAD * 2;
+    int pw     = vga12h_strpx("> ");
+    vga12h_rect  (cx + GT_PAD, in_y, in_w, GT_LH, GT_BG);
+    vga12h_string(cx + GT_PAD, in_y, "> ", GT_PR_FG, GT_BG);
+    int base_x = cx + GT_PAD + pw;
+    for (int i = 0; i <= gt_in_len; i++) {
+        int px = base_x + i * 8;
+        if (px + 8 > cx + cw - GT_PAD) break;
+        if (i == gt_in_cur) {
+            char ch[2] = { (i < gt_in_len) ? gt_in[i] : ' ', 0 };
+            vga12h_string(px, in_y, ch, GT_BG, GT_CUR_BG);
+        } else if (i < gt_in_len) {
+            char ch[2] = { gt_in[i], 0 };
+            vga12h_string(px, in_y, ch, GT_IN_FG, GT_BG);
+        }
+    }
+
     cursor_draw(mouse_x(), mouse_y());
 }
 
@@ -390,11 +478,35 @@ static void gterm_execute(char *cmd) {
     if (p[0]=='c' && p[1]=='l' && p[2]=='e' && p[3]=='a' && p[4]=='r' && !p[5]) {
         for (int r = 0; r < GTERM_ROWS; r++) gt_buf[r][0] = 0;
         gt_out_row = 0; gt_out_col = 0;
+	gt_dirty_from = 0;
         return;
     }
     terminal_set_hook(gterm_hook);
     parse_and_execute(cmd);
     terminal_set_hook(0);
+}
+
+static void gt_hist_push(const char *cmd) {
+    if (!cmd[0]) return;
+    // não duplica o último
+    if (gt_hist_count > 0) {
+        int last = (gt_hist_head - 1 + GT_HIST_MAX) % GT_HIST_MAX;
+        const char *a = gt_hist[last];
+        int i = 0;
+        while (a[i] && a[i] == cmd[i]) i++;
+        if (!a[i] && !cmd[i]) return;
+    }
+    int i = 0;
+    while (cmd[i] && i < GTERM_COLS) { gt_hist[gt_hist_head][i] = cmd[i]; i++; }
+    gt_hist[gt_hist_head][i] = '\0';
+    gt_hist_head = (gt_hist_head + 1) % GT_HIST_MAX;
+    if (gt_hist_count < GT_HIST_MAX) gt_hist_count++;
+}
+
+static const char *gt_hist_get(int idx) {
+    if (idx < 0 || idx >= gt_hist_count) return 0;
+    int slot = (gt_hist_head - 1 - idx + GT_HIST_MAX * 2) % GT_HIST_MAX;
+    return gt_hist[slot];
 }
 
 static void gterm_key(int key) {
@@ -404,6 +516,8 @@ static void gterm_key(int key) {
         gterm_hook('>'); gterm_hook(' ');
         for (int i = 0; i < gt_in_len; i++) gterm_hook(gt_in[i]);
         gterm_hook('\n');
+	gt_hist_push(gt_in);     // ← linha nova
+	gt_hist_idx = -1;        // ← linha nova
         if (gt_in_len > 0) gterm_execute(gt_in);
         gt_in[0] = 0; gt_in_len = 0; gt_in_cur = 0;
         gterm_redraw_only();
@@ -438,6 +552,27 @@ static void gterm_key(int key) {
         balloon_close(wid);
         return;
     }
+
+    if (key == KEY_UP || key == KEY_DOWN) {
+        if (key == KEY_UP && gt_hist_idx + 1 >= gt_hist_count) return;
+        if (key == KEY_DOWN && gt_hist_idx == -1) return;
+        // salva a linha atual antes de começar a navegar
+        if (key == KEY_UP && gt_hist_idx == -1) {
+            int i = 0;
+            while (i < gt_in_len) { gt_saved[i] = gt_in[i]; i++; }
+            gt_saved[i] = '\0';
+        }
+        gt_hist_idx += (key == KEY_UP) ? 1 : -1;
+        const char *entry = (gt_hist_idx == -1) ? gt_saved : gt_hist_get(gt_hist_idx);
+        gt_in_len = 0;
+        while (entry[gt_in_len] && gt_in_len < GTERM_COLS)
+            { gt_in[gt_in_len] = entry[gt_in_len]; gt_in_len++; }
+        gt_in[gt_in_len] = '\0';
+        gt_in_cur = gt_in_len;
+        gterm_redraw_only();
+        return;
+    }
+
     if (key >= 32 && key <= 126 && gt_in_len < GTERM_COLS) {
         for (int i = gt_in_len; i > gt_in_cur; i--) gt_in[i] = gt_in[i-1];
         gt_in[gt_in_cur++] = (char)key;
@@ -456,8 +591,8 @@ static void draw_gterm_content(int x, int y, int w, int h) {
     }
     int sep_y = y + GT_PAD_V + GTERM_ROWS * GT_LH + 1;
     vga12h_hline(x + GT_PAD, sep_y, w - GT_PAD * 2, GT_SEP_C);
-    int in_y   = sep_y + 3;
-    int pw     = vga12h_strpx("> ");
+    int in_y  = sep_y + 3;
+    int pw    = vga12h_strpx("> ");
     vga12h_string(x + GT_PAD, in_y, "> ", GT_PR_FG, GT_BG);
     int base_x = x + GT_PAD + pw;
     for (int i = 0; i <= gt_in_len; i++) {
@@ -684,8 +819,8 @@ static void draw_about_content(int x, int y, int w, int h) {
     vga12h_string(nx, y + 6, name, C_BLACK, C_WHITE);
     vga12h_hline(x + 6, y + 18, w - 12, C_DGRAY);
     const char *lines[] = {
-        "FreeRootSD/OS v0.5 Ultimate",
-        "Interface Balloon v0.1",
+        "FreeRootSD/OS v0.6 Reforged",
+        "Interface Balloon v0.2",
         "Modo VGA 12h  640x480",
         0
     };
@@ -768,13 +903,20 @@ static void draw_titlebar(int x, int y, int w, int active) {
 }
 
 static void draw_closebox(int x, int y) {
-    vga12h_rect  (x, y, CLOSEBOX_SZ, CLOSEBOX_SZ, C_LBLUE);
+    vga12h_rect  (x, y, CLOSEBOX_SZ, CLOSEBOX_SZ, C_LRED);
     vga12h_border(x, y, CLOSEBOX_SZ, CLOSEBOX_SZ, C_BLACK);
-    vga12h_pixel(x+3, y+3, C_BLACK); vga12h_pixel(x+7, y+3, C_BLACK);
-    vga12h_pixel(x+4, y+4, C_BLACK); vga12h_pixel(x+6, y+4, C_BLACK);
-    vga12h_pixel(x+5, y+5, C_BLACK);
-    vga12h_pixel(x+4, y+6, C_BLACK); vga12h_pixel(x+6, y+6, C_BLACK);
-    vga12h_pixel(x+3, y+7, C_BLACK); vga12h_pixel(x+7, y+7, C_BLACK);
+    vga12h_pixel(x+3, y+3, C_WHITE); vga12h_pixel(x+7, y+3, C_WHITE);
+    vga12h_pixel(x+4, y+4, C_WHITE); vga12h_pixel(x+6, y+4, C_WHITE);
+    vga12h_pixel(x+5, y+5, C_WHITE);
+    vga12h_pixel(x+4, y+6, C_WHITE); vga12h_pixel(x+6, y+6, C_WHITE);
+    vga12h_pixel(x+3, y+7, C_WHITE); vga12h_pixel(x+7, y+7, C_WHITE);
+}
+
+static void draw_minbox(int x, int y) {
+    vga12h_rect  (x, y, MINBOX_SZ, MINBOX_SZ, C_LBLUE);
+    vga12h_border(x, y, MINBOX_SZ, MINBOX_SZ, C_BLACK);
+    // traço horizontal no centro
+    vga12h_hline(x + 2, y + MINBOX_SZ / 2, MINBOX_SZ - 4, C_WHITE);
 }
 
 static void draw_window(int i) {
@@ -782,12 +924,32 @@ static void draw_window(int i) {
     if (!w->active) return;
     int x = w->x, y = w->y, ww = w->w, wh = w->h;
 
+    if (w->minimized) {
+        // Minimizado: só titlebar + sombra curta
+        vga12h_rect  (x + 4, y + 4, ww, TITLEBAR_H, C_LCYAN);
+        draw_titlebar(x, y, ww, 1);
+        int cb_y = y + (TITLEBAR_H - CLOSEBOX_SZ) / 2;
+        draw_closebox(x + 4, cb_y);
+        draw_minbox  (x + 4 + MINBOX_OFF, cb_y);
+        int tw = vga12h_strpx(w->title);
+        if (tw > 0) {
+            int tx = x + (ww - tw) / 2;
+            int ty = y + (TITLEBAR_H - 8) / 2;
+            vga12h_rect  (tx - 1, ty - 1, tw + 2, 10, C_LGREEN);
+            vga12h_string(tx, ty, w->title, C_BLACK, C_LGREEN);
+        }
+        vga12h_border(x, y, ww, TITLEBAR_H, C_BLACK);
+        return;
+    }
+
+    // Normal: janela completa
     vga12h_rect  (x + 4, y + 4, ww, wh, C_LCYAN);
     vga12h_rect  (x + 1, y + TITLEBAR_H + 1, ww - 2, wh - TITLEBAR_H - 2, C_WHITE);
     draw_titlebar(x, y, ww, 1);
 
     int cb_y = y + (TITLEBAR_H - CLOSEBOX_SZ) / 2;
     draw_closebox(x + 4, cb_y);
+    draw_minbox  (x + 4 + MINBOX_OFF, cb_y);
 
     int tw = vga12h_strpx(w->title);
     if (tw > 0) {
@@ -802,6 +964,17 @@ static void draw_window(int i) {
 
     if (w->draw_fn)
         w->draw_fn(x + 1, y + TITLEBAR_H + 1, ww - 2, wh - TITLEBAR_H - 2);
+
+    // Grip direito
+    int gx = x + ww - RESIZE_SZ - 1;
+    int gy = y + wh - RESIZE_SZ - 1;
+    for (int d = 2; d < RESIZE_SZ; d += 2)
+        vga12h_hline(gx + d, gy + d, RESIZE_SZ - d, C_LGRAY);
+
+    // Grip esquerdo
+    int glx = x + 1;
+    for (int d = 2; d < RESIZE_SZ; d += 2)
+        vga12h_hline(glx, gy + d, RESIZE_SZ - d, C_LGRAY);
 }
 
 // ----------------------------------------------------------------
@@ -841,27 +1014,39 @@ void balloon_init(void) {
 
 BalloonWin balloon_open(const char *title, int x, int y, int w, int h,
                         BalloonDraw draw_fn) {
-    for (int i = 0; i < BALLOON_MAX_WINDOWS; i++) {
-        if (!windows[i].active) {
-            windows[i].active  = 1;
-            windows[i].x = x; windows[i].y = y;
-            windows[i].w = w; windows[i].h = h;
-            windows[i].draw_fn = draw_fn;
-            int j = 0;
-            while (title[j] && j < 31) { windows[i].title[j] = title[j]; j++; }
-            windows[i].title[j] = '\0';
-            num_windows++;
-            balloon_redraw();
-            return i;
-        }
-    }
-    return BALLOON_INVALID;
+    if (num_windows >= BALLOON_MAX_WINDOWS) return BALLOON_INVALID;
+    int i = num_windows;
+    windows[i].active  = 1;
+    windows[i].x = x; windows[i].y = y;
+    windows[i].w = w; windows[i].h = h;
+    windows[i].draw_fn = draw_fn;
+    int j = 0;
+    while (title[j] && j < 31) { windows[i].title[j] = title[j]; j++; }
+    windows[i].title[j] = '\0';
+    num_windows++;
+    adlib_note_on(0, 784, 15, ADLIB_PIANO);
+    balloon_redraw();
+    return i;
 }
 
 void balloon_close(BalloonWin id) {
-    if (id < 0 || id >= BALLOON_MAX_WINDOWS) return;
+    if (id < 0 || id >= num_windows || !windows[id].active) return;
+
+    if (gt_win_id   == id) gt_win_id   = -1;
+    if (fexp_win_id == id) fexp_win_id = -1;
+    if (drag_id     == id) drag_id     = -1;  // ← volta aqui
+
     windows[id].active = 0;
     num_windows--;
+
+    if (id < num_windows) {
+        windows[id] = windows[num_windows];
+        windows[num_windows].active = 0;
+        if (gt_win_id   == num_windows) gt_win_id   = id;
+        if (fexp_win_id == num_windows) fexp_win_id = id;
+        if (drag_id     == num_windows) drag_id     = id;  // ← e aqui
+    }
+    adlib_note_on(0, 523, 15, ADLIB_PIANO);
     balloon_redraw();
 }
 
@@ -880,6 +1065,7 @@ static void icon_open_window(int idx) {
     if (wx < 0) wx = 0;
     if (wy < MENUBAR_H) wy = MENUBAR_H;
     BalloonWin wid = balloon_open(def->win_title, wx, wy, def->win_w, def->win_h, def->draw_content);
+
     if (idx == 0 && wid != BALLOON_INVALID) {
         gterm_open(wid);
     }
@@ -907,6 +1093,28 @@ static int hit_closebox(int id, int mx_, int my_) {
         && my_ >= cb_y     && my_ < cb_y + CLOSEBOX_SZ;
 }
 
+static int hit_minbox(int id, int mx_, int my_) {
+    Window *w = &windows[id];
+    if (!w->active) return 0;
+    int cb_y = w->y + (TITLEBAR_H - MINBOX_SZ) / 2;
+    return mx_ >= w->x + 4 + MINBOX_OFF
+        && mx_ <  w->x + 4 + MINBOX_OFF + MINBOX_SZ
+        && my_ >= cb_y
+        && my_ <  cb_y + MINBOX_SZ;
+}
+
+static int hit_resizebox(int id, int mx_, int my_) {
+    Window *w = &windows[id];
+    if (!w->active || w->minimized) return 0;
+    int gy = w->y + w->h - RESIZE_SZ;
+    if (my_ < gy || my_ >= w->y + w->h) return 0;
+    // canto direito
+    if (mx_ >= w->x + w->w - RESIZE_SZ && mx_ < w->x + w->w) return 1;
+    // canto esquerdo
+    if (mx_ >= w->x && mx_ < w->x + RESIZE_SZ) return 2;
+    return 0;
+}
+
 static int hit_menu_balloon(int mx_, int my_) {
     int lw = vga12h_strpx(menu_items[0].label);
     return my_ >= 0 && my_ < MENUBAR_H
@@ -931,23 +1139,30 @@ static int hit_dd_area(int mx_, int my_) {
 
 static int bring_to_front(int id) {
     if (id < 0 || id >= num_windows) return id;
-    if (id == num_windows - 1) return id; // já está no topo
+    if (id == num_windows - 1) return id;
+
     Window tmp = windows[id];
     for (int i = id; i < num_windows - 1; i++)
-        windows[i] = windows[i+1];
+        windows[i] = windows[i + 1];
     windows[num_windows - 1] = tmp;
+
+    if      (gt_win_id == id)           gt_win_id = num_windows - 1;
+    else if (gt_win_id > id)            gt_win_id--;
+
+    if      (fexp_win_id == id)         fexp_win_id = num_windows - 1;
+    else if (fexp_win_id > id)          fexp_win_id--;
+
     balloon_redraw();
     return num_windows - 1;
 }
-
 // ----------------------------------------------------------------
 // Loop de eventos
 // ----------------------------------------------------------------
 void balloon_run(void) {
-    int drag_id  = -1;
-    int drag_ox  = 0, drag_oy = 0;
+    static int drag_id = -1;
+    static int drag_ox = 0, drag_oy = 0;
     int btn_prev = 0;
-    int last_sec = -1;
+    uint32_t last_tick = 0;
     int last_click_time = 0;
     int last_click_idx = -1;
 
@@ -971,16 +1186,14 @@ void balloon_run(void) {
         }
 
         // ---- Atualiza relógio ----
-        if (!mouse_moved()) {
-            asm volatile ("hlt");
-            int rh, rm, rs;
-            rtc_get_time(&rh, &rm, &rs);
-            if (rs != last_sec) {
-                last_sec = rs;
-                redraw_clock_only();
-            }
-            continue;
-        }
+	if (!mouse_moved()) {
+	    asm volatile ("hlt");
+	    if (timer_get_ticks() - last_tick >= 1000) {
+	        last_tick = timer_get_ticks();
+	        redraw_clock_only();
+	    }
+	    continue;
+	}
 
         int mx_ = mouse_x();
         int my_ = mouse_y();
@@ -1029,18 +1242,38 @@ void balloon_run(void) {
                     balloon_close(i);
                     goto done_click;
                 }
+		// Minimizar / restaurar janela
+		if (hit_minbox(i, mx_, my_)) {
+		    windows[i].minimized = !windows[i].minimized;
+		    balloon_redraw();
+		    goto done_click;
+		}
             }
 
-            // 4. Arrastar janela pela titlebar
-            for (int i = BALLOON_MAX_WINDOWS - 1; i >= 0; i--) {
-                if (hit_titlebar(i, mx_, my_)) {
-		    int new_id = bring_to_front(i);
-                    drag_id = i;
-                    drag_ox = mx_ - windows[i].x;
-                    drag_oy = my_ - windows[i].y;
-                    goto done_click;
+	    // Redimensionar janela
+	    for (int i = num_windows - 1; i >= 0; i--) {
+	        if (!windows[i].active || windows[i].minimized) continue;
+	        int side = hit_resizebox(i, mx_, my_);
+	        if (side) {
+	            int new_id = bring_to_front(i);
+	            resize_id   = new_id;
+	            resize_left = (side == 2);
+	            resize_ox   = windows[new_id].x + windows[new_id].w - mx_;
+      	            resize_oy   = windows[new_id].y + windows[new_id].h - my_;
+        	    goto done_click;
                 }
-            }
+	    }
+
+	    // 4. Arrastar janela pela titlebar
+	    for (int i = BALLOON_MAX_WINDOWS - 1; i >= 0; i--) {
+	        if (hit_titlebar(i, mx_, my_)) {
+	            int new_id = bring_to_front(i);
+	            drag_id = new_id;
+	            drag_ox = mx_ - windows[new_id].x;
+	            drag_oy = my_ - windows[new_id].y;
+	            goto done_click;
+	        }
+	    }
 
             // 5. Cliques nos ícones do desktop
             {
@@ -1105,29 +1338,108 @@ void balloon_run(void) {
             done_click:;
         }
 
-        // ---- Arrastar janela ----
-        if (drag_id >= 0 && (btn & MOUSE_BTN_LEFT)) {
-            int nx = mx_ - drag_ox;
-            int ny = my_ - drag_oy;
-            if (nx < 0) nx = 0;
-            if (ny < MENUBAR_H) ny = MENUBAR_H;
-            if (nx + windows[drag_id].w > VGA12_W) nx = VGA12_W - windows[drag_id].w;
-            if (ny + windows[drag_id].h > VGA12_H) ny = VGA12_H - windows[drag_id].h;
-            windows[drag_id].x = nx;
-            windows[drag_id].y = ny;
-            balloon_redraw();
-        }
+	// ---- Arrastar janela ----
+	if (drag_id >= 0 && (btn & MOUSE_BTN_LEFT)) {
+	    int nx = mx_ - drag_ox;
+	    int ny = my_ - drag_oy;
+	    if (nx < 0) nx = 0;
+	    if (ny < MENUBAR_H) ny = MENUBAR_H;
+	    if (nx + windows[drag_id].w > VGA12_W) nx = VGA12_W - windows[drag_id].w;
+	    if (ny + windows[drag_id].h > VGA12_H) ny = VGA12_H - windows[drag_id].h;
 
-        // ---- Botão solto ----
-        if (!(btn & MOUSE_BTN_LEFT) && (btn_prev & MOUSE_BTN_LEFT))
-            drag_id = -1;
+	    cursor_erase();
 
-        // ---- Move cursor ----
-        if (drag_id < 0) {
-            cursor_erase();
-            cursor_draw(mx_, my_);
-        }
+	    if (nx != windows[drag_id].x || ny != windows[drag_id].y) {
+	        int ox = windows[drag_id].x;
+	        int oy = windows[drag_id].y;
+	        int ow = windows[drag_id].w + 4;  // +4 cobre a sombra
+        	int oh = windows[drag_id].h + 4;
 
+	        // 1. Repinta desktop na posição antiga (só escritas — rápido)
+	        int ex = ox, ey = oy, ew = ow, eh = oh;
+	        if (ex < 0)          { ew += ex; ex = 0; }
+	        if (ey < MENUBAR_H)  { eh -= (MENUBAR_H - ey); ey = MENUBAR_H; }
+	        if (ex + ew > VGA12_W) ew = VGA12_W - ex;
+	        if (ey + eh > VGA12_H) eh = VGA12_H - ey;
+	        if (ew > 0 && eh > 0)
+	            vga12h_rect(ex, ey, ew, eh, C_CYAN);
+
+	        // 2. Redesenha ícones que estavam sob a janela
+        	for (int i = 0; i < ICON_COUNT; i++) {
+	            int ix, iy;
+	            icon_pos(i, &ix, &iy);
+        	    if (ix < ox + ow && ix + ICON_IMG_W  > ox &&
+	                iy < oy + oh && iy + ICON_TOTAL_H > oy)
+        	        draw_icon(i);
+	        }
+
+	        // 3. Redesenha janelas que ficaram expostas (as que estão atrás)
+	        for (int i = 0; i < BALLOON_MAX_WINDOWS; i++) {
+	            if (i == drag_id || !windows[i].active) continue;
+	            Window *bw_ = &windows[i];
+	            if (bw_->x < ox + ow && bw_->x + bw_->w > ox &&
+	                bw_->y < oy + oh && bw_->y + bw_->h > oy)
+	                draw_window(i);
+	        }
+
+	        // 4. Desenha a janela na nova posição
+        	windows[drag_id].x = nx;
+	        windows[drag_id].y = ny;
+	        draw_window(drag_id);
+	    }
+
+	    cursor_draw(mx_, my_);
+	}
+
+	// ---- Redimensionar janela ----
+	if (resize_id >= 0 && (btn & MOUSE_BTN_LEFT)) {
+	    cursor_erase();
+	    if (resize_left) {
+	        // Arrasta borda esquerda: x e w mudam juntos
+	        int new_x  = mx_;
+	        int new_w  = windows[resize_id].x + windows[resize_id].w - new_x;
+	        int max_x  = windows[resize_id].x + windows[resize_id].w - WIN_MIN_W;
+	        if (new_x < 0)      new_x = 0;
+	        if (new_x > max_x)  new_x = max_x;
+	        new_w = windows[resize_id].x + windows[resize_id].w - new_x;
+	        int nh = my_ + resize_oy - windows[resize_id].y;
+	        if (nh < WIN_MIN_H) nh = WIN_MIN_H;
+	        if (windows[resize_id].y + nh > VGA12_H) nh = VGA12_H - windows[resize_id].y;
+	        if (new_x != windows[resize_id].x || nh != windows[resize_id].h) {
+	            windows[resize_id].x = new_x;
+	            windows[resize_id].w = new_w;
+	            windows[resize_id].h = nh;
+	            balloon_redraw();
+	        }
+	    } else {
+	        // Arrasta borda direita: só w e h mudam
+	        int nw = mx_ + resize_ox - windows[resize_id].x;
+	        int nh = my_ + resize_oy - windows[resize_id].y;
+	        if (nw < WIN_MIN_W) nw = WIN_MIN_W;
+	        if (nh < WIN_MIN_H) nh = WIN_MIN_H;
+	        if (windows[resize_id].x + nw > VGA12_W) nw = VGA12_W - windows[resize_id].x;
+	        if (windows[resize_id].y + nh > VGA12_H) nh = VGA12_H - windows[resize_id].y;
+        	if (nw != windows[resize_id].w || nh != windows[resize_id].h) {
+	            windows[resize_id].w = nw;
+	            windows[resize_id].h = nh;
+	            balloon_redraw();
+	        }
+	    }
+	    cursor_draw(mx_, my_);
+	}
+
+	// ---- Botão solto ----
+	if (!(btn & MOUSE_BTN_LEFT) && (btn_prev & MOUSE_BTN_LEFT)) {
+	    if (drag_id >= 0)   balloon_redraw();
+	    if (resize_id >= 0) { balloon_redraw(); resize_id = -1; }
+	    drag_id = -1;
+	}
+
+	// ---- Move cursor ----
+	if (drag_id < 0) {
+	    cursor_erase();
+	    cursor_draw(mx_, my_);
+	}
         btn_prev = btn;
     }
 }

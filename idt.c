@@ -51,7 +51,7 @@ static void pic_remap(void) {
     outb(PIC1_DATA, 0x01); io_wait();
     outb(PIC2_DATA, 0x01); io_wait();
     outb(PIC1_DATA, 0b11111000); // IRQ0=timer, IRQ1=teclado, IRQ2=cascade PIC2 (mouse)
-    outb(PIC2_DATA, 0b11111111);
+    outb(PIC2_DATA, 0b11101111);  // só IRQ12 (mouse)
 }
 
 // ----------------------------------------------------------------
@@ -142,8 +142,7 @@ void isr_handler(struct regs *r) {
     terminal_writestring("ESI: "); print_hex(r->esi);
     terminal_writestring("  EDI: "); print_hex(r->edi); terminal_writestring("\n\n");
     terminal_writestring("\nSistema Travado! Reinicie o computador.\n");
-    while (inb(0x64) & 0x02);
-    outb(0x64, 0xFE);
+    // Exibe mensagem e trava — não reinicia
     while (1) asm volatile ("hlt");
 }
 
@@ -188,6 +187,8 @@ ISR_NOERR(28) ISR_ERR(29)   ISR_ERR(30)   ISR_NOERR(31)
 // ----------------------------------------------------------------
 // IRQ handlers (IRQ0 = timer, IRQ1 = teclado, IRQ12 = mouse)
 // ----------------------------------------------------------------
+void rtl8139_irq_handler(void);
+
 static void timer_handler(void) {
     ticks++;
     outb(PIC1_CMD, PIC_EOI);
@@ -208,15 +209,18 @@ static void __attribute__((naked)) irq12_stub(void) {
     asm volatile ("pusha\n\t" "call mouse_irq\n\t" "popa\n\t" "iret");
 }
 
+static void __attribute__((naked)) irq11_stub(void) {
+    asm volatile ("pusha\n\t" "call rtl8139_irq_handler\n\t" "popa\n\t" "iret");
+}
+
 // ----------------------------------------------------------------
 // Inicialização da IDT
 // ----------------------------------------------------------------
 void idt_init(void) {
     for (int i = 0; i < 256; i++) {
+        idt[i].type_attr = 0x0E;   // era 0x8E — bit 7 = 0 = não presente
+        idt[i].selector  = 0x08;
         idt[i].offset_low  = 0;
-        idt[i].selector    = 0x08;
-        idt[i].zero        = 0;
-        idt[i].type_attr   = 0x8E;
         idt[i].offset_high = 0;
     }
 

@@ -5,7 +5,7 @@
 
 #define FS_NAME_LEN   8
 #define FS_EXT_LEN    3
-#define FS_MAX        64   // total de entradas (arquivos + diretórios)
+#define FS_MAX        512   // total de entradas (arquivos + diretórios)
 #define FS_ROOT       0    // índice da raiz
 
 #define FS_FREE  0
@@ -28,6 +28,7 @@ void        fs_init(void);
 uint8_t     fs_cwd(void);
 void        fs_set_cwd(uint8_t idx);            // índice do dir corrente
 const char *fs_cwd_name(void);       // nome do dir corrente ("" se raiz)
+void        fs_cwd_path(char *buf, int maxlen);  // ← linha nova: "DIR/SUBDIR"
 int         fs_cd(const char *name); // 0 ok, -1 não existe
 
 // Operações

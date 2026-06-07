@@ -128,11 +128,10 @@ void fs_split(const char *input, char *name, char *ext) {
 
 int fs_cd(const char *name) {
     if (fs_strcmpi(name, "..") == 0) {
-        cwd = table[cwd].parent;
+        if (cwd != FS_ROOT) cwd = table[cwd].parent;
         return 0;
     }
-    // Diretórios ficam sempre na raiz
-    int idx = fs_find(name, "", FS_ROOT);
+    int idx = fs_find(name, "", cwd);              // ← cwd, não FS_ROOT
     if (idx < 0 || table[idx].type != FS_DIR) return -1;
     cwd = (uint8_t)idx;
     return 0;
@@ -140,16 +139,42 @@ int fs_cd(const char *name) {
 
 int fs_mkdir(const char *name) {
     if (!fs_valid(name, FS_NAME_LEN)) return -2;
-    if (fs_find(name, "", FS_ROOT) >= 0) return -3; // já existe
+    if (fs_find(name, "", cwd) >= 0) return -3;   // ← cwd
     int idx = fs_slot();
     if (idx < 0) return -1;
     table[idx].type   = FS_DIR;
-    table[idx].parent = FS_ROOT;
+    table[idx].parent = cwd;                       // ← cwd, não FS_ROOT
     table[idx].data   = 0;
     table[idx].size   = 0;
     table[idx].ext[0] = '\0';
     fs_normcpy_upper(table[idx].name, name, FS_NAME_LEN + 1);
     return idx;
+}
+
+void fs_cwd_path(char *buf, int maxlen) {
+    if (cwd == FS_ROOT) { buf[0] = '\0'; return; }
+
+    uint8_t stack[FS_MAX];
+    int depth = 0;
+    uint8_t cur = cwd;
+
+    // Sobe até a raiz empilhando cada nível
+    while (depth < FS_MAX) {
+        stack[depth++] = cur;
+        uint8_t par = table[cur].parent;
+        if (par == cur || par == FS_ROOT) break;  // ← condição correta
+        cur = par;
+    }
+
+    // Monta o caminho de cima para baixo
+    int pos = 0;
+    for (int i = depth - 1; i >= 0 && pos < maxlen - 2; i--) {
+        buf[pos++] = '/';
+        const char *n = table[stack[i]].name;
+        for (int j = 0; n[j] && pos < maxlen - 2; j++)
+            buf[pos++] = n[j];
+    }
+    buf[pos] = '\0';
 }
 
 // Grava arquivo no diretório 'dir'
@@ -195,31 +220,25 @@ const char *fs_read(const char *name, const char *ext) {
     return table[idx].data;
 }
 
+static void fs_delete_recursive(uint8_t dir_idx) {
+    for (int i = 1; i < FS_MAX; i++) {
+        if (table[i].type == FS_FREE) continue;
+        if (table[i].parent != dir_idx) continue;
+        if (table[i].type == FS_DIR)
+            fs_delete_recursive((uint8_t)i);
+        if (table[i].data) { kfree(table[i].data); table[i].data = 0; }
+        table[i].type = FS_FREE;
+        table[i].size = 0;
+    }
+}
+
 int fs_delete(const char *name, const char *ext, int is_dir) {
     if (is_dir) {
-        // Diretórios só podem ser deletados da raiz
-        int idx = fs_find(name, "", FS_ROOT);
+        int idx = fs_find(name, "", cwd);             // ← cwd, não FS_ROOT
         if (idx < 0 || table[idx].type != FS_DIR || idx == FS_ROOT) return -1;
-        // Deleta tudo dentro
-        for (int i = 1; i < FS_MAX; i++) {
-            if (table[i].type != FS_FREE && table[i].parent == (uint8_t)idx) {
-                if (table[i].data) kfree(table[i].data);
-                table[i].type = FS_FREE;
-                table[i].data = 0;
-                table[i].size = 0;
-            }
-        }
-        // Se estava dentro desse dir, volta pra raiz
-        if (cwd == (uint8_t)idx) cwd = FS_ROOT;
+        fs_delete_recursive((uint8_t)idx);
+        if (cwd == (uint8_t)idx) cwd = table[idx].parent;
         table[idx].type = FS_FREE;
-        return 0;
-    } else {
-        int idx = fs_find(name, ext ? ext : "", cwd);
-        if (idx < 0 || table[idx].type != FS_FILE) return -1;
-        if (table[idx].data) kfree(table[idx].data);
-        table[idx].type = FS_FREE;
-        table[idx].data = 0;
-        table[idx].size = 0;
         return 0;
     }
 }
