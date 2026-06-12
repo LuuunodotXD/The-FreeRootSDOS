@@ -1,6 +1,10 @@
 #ifndef ARP_H
 #define ARP_H
+#define ARP_TABLE_SIZE  16
 #include <stdint.h>
+
+typedef struct { uint8_t ip[4]; uint8_t mac[6]; int valid; } ArpEntry;
+extern ArpEntry arp_table[ARP_TABLE_SIZE];
 
 // Resolve IP → MAC (envia request e aguarda reply, timeout em ms)
 // Retorna 1 se resolvido, 0 se timeout

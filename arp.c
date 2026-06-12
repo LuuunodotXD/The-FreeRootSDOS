@@ -20,13 +20,7 @@ typedef struct {
 // Tabela ARP
 #define ARP_TABLE_SIZE  16
 
-typedef struct {
-    uint8_t ip[4];
-    uint8_t mac[6];
-    int     valid;
-} ArpEntry;
-
-static ArpEntry arp_table[ARP_TABLE_SIZE];
+ArpEntry arp_table[ARP_TABLE_SIZE];
 
 static const uint8_t broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 

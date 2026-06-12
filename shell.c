@@ -17,6 +17,7 @@
 #include "icmp.h"
 #include "dns.h"
 #include "tcp.h"
+#include "bmp.h"
 #include <stddef.h>
 
 // Protótipo para parse_and_execute (necessário para run_script)
@@ -70,6 +71,32 @@ static void print_hex_byte(uint8_t b) {
 }
 
 static void print_kb(uint32_t b) { print_uint(b / 1024); terminal_writestring(" KB"); }
+
+// Divide "arquivo.ext" em name e ext separados
+static void split_filename(const char *fname,
+                            char *name, int nmax,
+                            char *ext,  int emax) {
+    // Encontra o último ponto
+    int dot = -1, i = 0;
+    while (fname[i]) { if (fname[i] == '.') dot = i; i++; }
+
+    int nlen = (dot >= 0) ? dot : i;
+    if (nlen >= nmax) nlen = nmax - 1;
+    for (int j = 0; j < nlen; j++) name[j] = fname[j];
+    name[nlen] = 0;
+
+    if (dot >= 0) {
+        int elen = 0;
+        for (int j = dot + 1; fname[j] && elen < emax - 1; j++)
+            ext[elen++] = fname[j];
+        ext[elen] = 0;
+    } else {
+        ext[0] = 0;
+    }
+}
+
+// Buffer de download (32 KB em BSS)
+static uint8_t wget_body[32768];
 
 // ----------------------------------------------------------------
 // Expansão de variáveis de ambiente
@@ -205,6 +232,124 @@ static void redraw_from(const char *buf, int from, int len, int cur) {
     terminal_cursor_right(cur - from);
 }
 
+static int tc_strncmpi(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca>='a'&&ca<='z') ca-=32; if (cb>='a'&&cb<='z') cb-=32;
+        if (!ca && !cb) return 0;
+        if (ca != cb) return ca - cb;
+    }
+    return 0;
+}
+
+static void tc_lower(char *dst, const char *src) {
+    int i = 0;
+    while (src[i] && i < 31) {
+        char c = src[i];
+        if (c>='A'&&c<='Z') c+=32;
+        dst[i] = c; i++;
+    }
+    dst[i] = 0;
+}
+
+static void tab_complete(char *buf, int *lenp, int *curp, int maxlen) {
+    // Palavra sendo digitada: do último espaço até o cursor
+    int ws = *curp;
+    while (ws > 0 && buf[ws-1] != ' ') ws--;
+    int plen = *curp - ws;
+    if (plen >= 31) return;
+
+    char prefix[32]; int pi = 0;
+    for (int i = ws; i < *curp; i++) prefix[pi++] = buf[i];
+    prefix[pi] = 0;
+    int is_cmd = (ws == 0);
+
+    // Lista de comandos built-in
+    static const char *cmds[] = {
+        "dir","cd","md","del","rename","copy","move","write","cat","append",
+        "clear","cat","help","time","date","reboot","format","env","set","unset",
+        "drive","balloon","pwd","beep","view","wget","ping","arping","resolve",
+        "ifconfig","arp","ntp","edit","poweroff", 0
+    };
+
+    char matches[16][16]; int nm = 0;
+
+    // Completa comandos se for a primeira palavra
+    if (is_cmd) {
+        for (int i = 0; cmds[i] && nm < 16; i++)
+            if (tc_strncmpi(cmds[i], prefix, plen) == 0) {
+                tc_lower(matches[nm], cmds[i]); nm++;
+            }
+    }
+
+    // Completa arquivos/diretórios do cwd
+    uint8_t cwd_idx = drv_cwd();
+    if (on_disk()) {
+        fsd_entry_t *t = fsd_table();
+        for (int i = 1; i < fsd_max() && nm < 16; i++) {
+            if (t[i].type == FSD_FREE || t[i].parent != cwd_idx) continue;
+            char fname[16] = {0}; int fi = 0;
+            for (int j=0;t[i].name[j]&&fi<8;j++) fname[fi++]=t[i].name[j];
+            if (t[i].ext[0] && t[i].type == FSD_FILE)
+                { fname[fi++]='.'; for(int j=0;t[i].ext[j]&&fi<12;j++) fname[fi++]=t[i].ext[j]; }
+            fname[fi] = 0;
+            if (tc_strncmpi(fname, prefix, plen) == 0) {
+                tc_lower(matches[nm], fname); nm++;
+            }
+        }
+    } else {
+        fs_entry_t *t = fs_table();
+        for (int i = 1; i < fs_max() && nm < 16; i++) {
+            if (t[i].type == FS_FREE || t[i].parent != cwd_idx) continue;
+            char fname[16] = {0}; int fi = 0;
+            for (int j=0;t[i].name[j]&&fi<8;j++) fname[fi++]=t[i].name[j];
+            if (t[i].ext[0] && t[i].type == FS_FILE)
+                { fname[fi++]='.'; for(int j=0;t[i].ext[j]&&fi<12;j++) fname[fi++]=t[i].ext[j]; }
+            fname[fi] = 0;
+            if (tc_strncmpi(fname, prefix, plen) == 0) {
+                tc_lower(matches[nm], fname); nm++;
+            }
+        }
+    }
+
+    if (nm == 0) return;
+
+    if (nm == 1) {
+        // Único match: completa in-place
+        const char *rest = matches[0] + plen;
+        int rlen = 0; while (rest[rlen]) rlen++;
+        int add  = rlen + (is_cmd ? 1 : 0);
+        if (*lenp + add >= maxlen) return;
+        // Abre espaço no buffer
+        for (int i = *lenp; i >= *curp; i--) buf[i + add] = buf[i];
+        for (int i = 0; i < rlen; i++) buf[*curp + i] = rest[i];
+        if (is_cmd) buf[*curp + rlen] = ' ';
+        *lenp += add; *curp += add; buf[*lenp] = 0;
+        // Exibe os chars inseridos
+        for (int i = *curp - add; i < *curp; i++) terminal_putchar(buf[i]);
+        // Re-exibe o restante da linha após o cursor
+        for (int i = *curp; i < *lenp; i++) terminal_putchar(buf[i]);
+        terminal_cursor_left(*lenp - *curp);
+    } else {
+        // Múltiplos matches: exibe na linha de baixo e reimprime o buffer
+        terminal_putchar('\n');
+        for (int i = 0; i < nm; i++) {
+            terminal_writestring(matches[i]);
+            terminal_putchar(' ');
+        }
+        terminal_putchar('\n');
+        // Reimprime prompt simplificado (só "> ")
+        char pathbuf[64];
+        drv_cwd_path(pathbuf, sizeof(pathbuf));
+        if (show_drive) { terminal_putchar(active_drive); terminal_putchar(':'); }
+        terminal_writestring(pathbuf[0] ? pathbuf : "/");
+        terminal_writestring("> ");
+        // Reimprime buffer atual e reposiciona cursor
+        for (int i = 0; i < *lenp; i++) terminal_putchar(buf[i]);
+        terminal_cursor_left(*lenp - *curp);
+    }
+}
+
 static void readline(char *buf, int maxlen) {
     int len = 0, cur = 0, hist_idx = -1;
     char saved[HIST_LEN]; saved[0] = '\0';
@@ -224,6 +369,11 @@ static void readline(char *buf, int maxlen) {
             redraw_from(buf, cur, len, cur);
             continue;
         }
+	if (k == '\t') {
+	    tab_complete(buf, &len, &cur, maxlen);
+	    hist_idx = -1;
+	    continue;
+	}
         if (k == KEY_DEL) {
             if (cur == len) continue;
             for (int i = cur; i < len - 1; i++) buf[i] = buf[i + 1];
@@ -836,6 +986,13 @@ static int execute_command(const char *cmd) {
         terminal_putchar('\n');
         return 1;
     }
+    if (startswith(cmd, "view ")) {
+        const char *fname = startswith(cmd, "view ");
+        char nm[9]={0}, ex[4]={0};
+        split_filename(fname, nm, 9, ex, 4);
+        bmp_view(nm, ex);
+        return 1;
+    }
     if (startswith(cmd, "cd ")) { drv_cd(startswith(cmd, "cd ")); return 1; }
     if (strcmpi(cmd, "cd..") == 0 || strcmpi(cmd, "cd ..") == 0) { drv_cd(".."); return 1; }
     if (startswith(cmd, "write ")) { cmd_write(startswith(cmd, "write ")); return 1; }
@@ -855,7 +1012,7 @@ static int execute_command(const char *cmd) {
         const char *arg = cmd[4] ? cmd + 5 : "1";
         while (*arg == ' ') arg++;
         if (*arg == '2') {
-            terminal_writestring("Comandos (2/2):\n");
+            terminal_writestring("Comandos (2/3):\n");
             terminal_writestring("  dir [-a][-s] [pasta] - lista (a=ocultos, s=arvore)\n");
             terminal_writestring("  md <nome>        - cria diretorio\n");
             terminal_writestring("  cd <nome>/..     - navega dirs\n");
@@ -870,9 +1027,20 @@ static int execute_command(const char *cmd) {
             terminal_writestring("  edit <arq>       - editor de texto\n");
             terminal_writestring("  hexdump <arq>    - editor hexadecimal\n");
             terminal_writestring("  calc <expr>      - calculadora\n");
+        } else if (*arg == '3') {
+            terminal_writestring("Comandos (3/3):\n");
+            terminal_writestring("  view <imagem.bmp> - visualizador BMP (320x200 216 cores)\n");
+            terminal_writestring("  wget <url>        - baixa arquivo HTTP e salva no disco\n");
+            terminal_writestring("  ping <host|ip>    - ICMP echo (4 pacotes)\n");
+            terminal_writestring("  resolve <host>    - consulta DNS (mostra IP)\n");
+            terminal_writestring("  arping <ip>       - resolucao ARP (IP -> MAC)\n");
+            terminal_writestring("  arp               - mostra tabela ARP\n");
+            terminal_writestring("  ifconfig          - exibe configuração de rede\n");
+            terminal_writestring("  tcptest           - teste TCP (conecta e faz GET)\n");
+            terminal_writestring("  beep              - toca nota no PC Speaker\n");
         } else {
-            terminal_writestring("Comandos (1/2):\n");
-            terminal_writestring("  help [2]         - ajuda\n");
+            terminal_writestring("Comandos (1/3):\n");
+            terminal_writestring("  help [2|3]       - ajuda (paginas 1,2,3)\n");
             terminal_writestring("  clear            - limpa tela\n");
             terminal_writestring("  reboot/poweroff\n");
             terminal_writestring("  info             - sobre o sistema\n");
@@ -885,7 +1053,7 @@ static int execute_command(const char *cmd) {
             terminal_writestring("  color/bgcolor <0-F>\n");
             terminal_writestring("  meminfo\n");
             terminal_writestring("  arquivo          - executa .bin ou .cha\n");
-	    terminal_writestring("  balloon          - inicia a interface grafica\n");
+            terminal_writestring("  balloon          - inicia a interface grafica\n");
         }
         return 1;
     }
@@ -1046,6 +1214,120 @@ static int execute_command(const char *cmd) {
         terminal_putchar('\n');
         return 1;
     }
+    // Comando wget
+    if (startswith(cmd, "wget ")) {
+        const char *url = startswith(cmd, "wget ");
+
+        // Suporta "http://" ou sem prefixo
+        if (url[0]=='h' && url[1]=='t' && url[2]=='t' && url[3]=='p' &&
+            url[4]==':' && url[5]=='/' && url[6]=='/') url += 7;
+
+        // Extrai hostname e path
+        char host[64] = {0};
+        const char *path = "/";
+        int hi = 0;
+        while (url[hi] && url[hi] != '/' && hi < 63) {
+            host[hi] = url[hi]; hi++;
+        }
+        host[hi] = 0;
+        if (url[hi] == '/') path = url + hi;
+
+        // Extrai nome do arquivo do path
+        const char *fname = path;
+        for (int i = 0; path[i]; i++)
+            if (path[i] == '/') fname = path + i + 1;
+        if (!fname[0]) fname = "index.html";
+
+        char fname_buf[32];
+        int fi = 0;
+        while (fname[fi] && fname[fi] != '?' && fi < 31)
+            { fname_buf[fi] = fname[fi]; fi++; }
+        fname_buf[fi] = 0;
+        if (!fname_buf[0]) { fname_buf[0]='i'; fname_buf[1]='n'; fname_buf[2]='d';
+                             fname_buf[3]='e'; fname_buf[4]='x'; fname_buf[5]='.';
+                             fname_buf[6]='h'; fname_buf[7]='t'; fname_buf[8]='m';
+                             fname_buf[9]='l'; fname_buf[10]=0; }
+
+        // Resolve DNS
+        terminal_writestring("Resolvendo ");
+        terminal_writestring(host);
+        terminal_writestring("...\n");
+        uint8_t ip[4];
+        if (!dns_resolve(host, ip, 3000)) {
+            terminal_writestring("DNS falhou.\n"); return 1;
+        }
+
+        // Conecta TCP
+        terminal_writestring("Conectando...\n");
+        static TcpConn conn;
+        if (!tcp_connect(&conn, ip, 80, 5000)) {
+            terminal_writestring("Falha TCP.\n"); return 1;
+        }
+
+        // Envia request HTTP/1.0
+        static char req[256];
+        int rpos = 0;
+        const char *g1 = "GET "; const char *g2 = " HTTP/1.0\r\nHost: ";
+        const char *g3 = "\r\n\r\n";
+        for (int i = 0; g1[i]; i++) req[rpos++] = g1[i];
+        for (int i = 0; path[i]; i++) req[rpos++] = path[i];
+        for (int i = 0; g2[i]; i++) req[rpos++] = g2[i];
+        for (int i = 0; host[i]; i++) req[rpos++] = host[i];
+        for (int i = 0; g3[i]; i++) req[rpos++] = g3[i];
+        tcp_send(&conn, (const uint8_t *)req, (uint16_t)rpos);
+
+        // Recebe resposta completa
+        uint32_t total = 0;
+        uint8_t  chunk[512];
+        int n;
+        while ((n = tcp_recv(&conn, chunk, 512, 3000)) > 0) {
+            if (total + n > sizeof(wget_body)) n = (int)(sizeof(wget_body) - total);
+            for (int i = 0; i < n; i++) wget_body[total + i] = chunk[i];
+            total += n;
+            if (total >= sizeof(wget_body)) break;
+        }
+        tcp_close(&conn);
+
+        if (total == 0) { terminal_writestring("Sem resposta.\n"); return 1; }
+
+        // Pula headers HTTP (procura \r\n\r\n)
+        uint32_t body_start = 0;
+        for (uint32_t i = 0; i + 3 < total; i++) {
+            if (wget_body[i]=='\r' && wget_body[i+1]=='\n' &&
+                wget_body[i+2]=='\r' && wget_body[i+3]=='\n') {
+                body_start = i + 4; break;
+            }
+        }
+
+        uint32_t body_len = total - body_start;
+
+        // Mostra status HTTP
+        wget_body[total] = 0;
+        terminal_writestring("HTTP: ");
+        for (int i = 9; wget_body[i] && wget_body[i] != '\r'; i++)
+            terminal_putchar(wget_body[i]);
+        terminal_putchar('\n');
+
+        if (body_len == 0) { terminal_writestring("Body vazio.\n"); return 1; }
+
+        // Salva no filesystem
+        char fname_name[9] = {0}, fname_ext[4] = {0};
+        split_filename(fname_buf, fname_name, 9, fname_ext, 4);
+
+        int r = drv_write(fname_name, fname_ext,
+                          wget_body + body_start, body_len);
+        if (r >= 0) {
+            terminal_writestring("Salvo: ");
+            terminal_writestring(fname_name);
+            if (fname_ext[0]) { terminal_putchar('.'); terminal_writestring(fname_ext); }
+            terminal_writestring(" (");
+            print_uint(body_len);
+            terminal_writestring(" bytes)\n");
+        } else {
+            terminal_writestring("Erro ao salvar.\n");
+        }
+        return 1;
+    }
 
     // Outros
     // Script .cha
@@ -1141,6 +1423,17 @@ static int do_tty_switch(int n) {
     }
     tty_restore_shell_state();
     return 0;
+}
+
+const char *vfs_read(const char *name, const char *ext) {
+    return drv_read(name, ext);
+}
+int vfs_write(const char *name, const char *ext,
+              const char *data, uint32_t size) {
+    return drv_write(name, ext, data, size);
+}
+int vfs_delete(const char *name, const char *ext, int is_dir) {
+    return drv_delete(name, ext, is_dir);
 }
 
 // ----------------------------------------------------------------

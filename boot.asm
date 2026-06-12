@@ -42,12 +42,21 @@ start:
     call read_lba
     jc disk_error
 
-    ; Leitura 3: LBA 255-320 (66 setores) -> 0x2DC0:0x0000 = 0x2DC00
+    ; Leitura 3: LBA 255-381 (127 setores) -> 0x2FC0:0x0000 = 0x2FC00  ← corrigido
     mov eax, 255
-    mov bx, 0x2DC0
+    mov bx, 0x2FC0       ; era 0x2DC0 — endereço errado
     mov es, bx
     xor bx, bx
-    mov cx, 66
+    mov cx, 127          ; era 66
+    call read_lba
+    jc disk_error
+
+    ; Leitura 4: LBA 382-508 (127 setores) -> 0x3FA0:0x0000 = 0x3FA00  ← nova
+    mov eax, 382
+    mov bx, 0x3FA0
+    mov es, bx
+    xor bx, bx
+    mov cx, 127
     call read_lba
     jc disk_error
 

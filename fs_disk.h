@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
-#define FSD_SECTOR_SB      321     // superbloco
-#define FSD_SECTOR_TABLE   322     // tabela (4 setores: 322..325)
-#define FSD_SECTOR_DATA    348     // dados a partir daqui
-#define FSD_DATA_SECTORS   372     // até setor 719 (720-348=372)
+#define FSD_SECTOR_SB      509     // superbloco
+#define FSD_SECTOR_TABLE   510     // tabela (4 setores: 322..325)
+#define FSD_SECTOR_DATA    526     // dados a partir daqui
+#define FSD_DATA_SECTORS   914     // até setor 719 (1440-526=914)
 
 #define FSD_MAGIC          0x46524453u
 #define FSD_MAX            64

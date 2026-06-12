@@ -36,10 +36,12 @@ i686-linux-gnu-gcc $CFLAGS -c icmp.c     -o icmp.o
 i686-linux-gnu-gcc $CFLAGS -c udp.c      -o udp.o
 i686-linux-gnu-gcc $CFLAGS -c dns.c      -o dns.o
 i686-linux-gnu-gcc $CFLAGS -c tcp.c      -o tcp.o
+i686-linux-gnu-gcc $CFLAGS -c bmp.c      -o bmp.o
+i686-linux-gnu-gcc $CFLAGS -c minesweeper.c -o minesweeper.o
 
 echo "==> Linkando..."
 i686-linux-gnu-ld -m elf_i386 -T linker.ld -o kernel.elf \
-    entry.o kernel.o terminal.o shell.o keyboard.o idt.o kmalloc.o fs.o disk.o fs_disk.o programs.o tty.o env.o vga12h.o mouse.o balloon.o vga_mode.o adlib.o pci.o rtl8139.o net.o arp.o ip.o icmp.o udp.o dns.o tcp.o
+    entry.o kernel.o terminal.o shell.o keyboard.o idt.o kmalloc.o fs.o disk.o fs_disk.o programs.o tty.o env.o vga12h.o mouse.o balloon.o vga_mode.o adlib.o pci.o rtl8139.o net.o arp.o ip.o icmp.o udp.o dns.o tcp.o bmp.o minesweeper.o
 
 echo "==> Verificando entry point..."
 nm kernel.elf | grep -E "_start|kernel_main|_bss"
@@ -47,7 +49,7 @@ nm kernel.elf | grep -E "_start|kernel_main|_bss"
 echo "==> Gerando binário..."
 objcopy -O binary kernel.elf kernel.bin
 cat boot.bin kernel.bin > os_image.bin
-truncate -s 368640 os_image.bin   # 720 setores x 512 = 360 KB (kernel 320 + fs 400)
+truncate -s 737280 os_image.bin   # 720 setores x 512 = 360 KB (kernel 320 + fs 400)
 
 echo ""
 echo "Tamanhos:"
