@@ -45,7 +45,7 @@ FreeRootSDOS/
 
 ### Bootloader (v0.7 — reescrito do zero)
 
-A v0.6 tinha um bootloader de estágio único sem suporte a LBA, sem GDT real e sem detecção de hardware — apenas suficiente para dar boot. Na v0.7 o bootloader foi reescrito completamente em dois estágios:
+A v0.6 tinha um bootloader de estágio único, sem GDT real e sem detecção de hardware — apenas suficiente para dar boot. Na v0.7 o bootloader foi reescrito completamente em dois estágios:
 
 - **Stage 1** (512 bytes, setor 0): lê o Stage 2 do disco via LBA estendido (INT 13h/42h), com fallback para CHS em hardware legado
 - **Stage 2** (`loader.asm`): ativa A20 por três métodos em cascata (porta 0x92, BIOS INT 15h, controlador KBC 8042), monta a GDT com segmentos flat 32-bit, entra em modo protegido e carrega o kernel do disco via LBA
